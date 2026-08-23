@@ -47,7 +47,7 @@ Hydra -> umu/wine -> Game.exe (running)
 ## Install
 
 ```sh
-git clone https://github.com/<you>/hydra-rpc.git
+git clone https://github.com/skypetroller/hydra-rpc.git
 cd hydra-rpc
 sudo cp hydra-rpc /usr/local/bin/hydra-rpc   # or: cp hydra-rpc ~/.local/bin/
 ```
