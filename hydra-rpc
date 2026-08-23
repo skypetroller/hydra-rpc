@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""hydra-rpc: report Wine/Proton/umu games to Discord (via arRPC) as Rich Presence.
+"""hydra-rpc: report Windows games (Wine/Proton/umu) to Discord (via arRPC) as Rich Presence.
 
-Scans /proc for Windows executables running under Wine/Proton/umu, maps them to
-their Discord application id using Discord's detectable-applications database,
+Scans /proc for Windows executables running under any Wine/Proton runtime, maps them
+to their Discord application id using Discord's detectable-applications database,
 and pushes a "Playing <Game>" activity to arRPC's IPC socket so it shows up in
 Vesktop / any client connected to arRPC.
 """

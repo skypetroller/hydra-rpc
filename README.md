@@ -1,7 +1,21 @@
 # hydra-rpc
 
-Show "Playing <Game>" in Discord (via [arRPC](https://github.com/OpenAsar/arrpc)) for games
-launched through [Hydra Launcher](https://github.com/hydralauncher/hydra) on Linux.
+Show "Playing <Game>" in Discord (via [arRPC](https://github.com/OpenAsar/arrpc)) for Windows
+games launched on Linux through [Hydra Launcher](https://github.com/hydralauncher/hydra) —
+or any other Wine-based launcher.
+
+## Compatibility
+
+`hydra-rpc` is **launcher-agnostic**: it doesn't care what compatibility layer started
+the game, it just looks for a running `.exe`. It works with all of the following:
+
+- **Proton** (standard) and **Proton GE**
+- **UMU-Proton** (Hydra's default)
+- **plain Wine**
+- **Lutris**, **Bottles**, **Heroic Games Launcher**, **Rare**
+
+As long as the game is a Windows `.exe` (not a native Linux binary) and its basename is
+in Discord's detectable database (or in your `overrides`), it will show up.
 
 ## The problem
 
@@ -29,8 +43,8 @@ Hydra -> umu/wine -> Game.exe (running)
 
 `hydra-rpc` is a dependency-free Python 3 script that:
 
-1. Scans `/proc/*/cmdline` for Windows executables running under Wine/Proton/umu
-   (any argument ending in `.exe`, minus a blocklist of Wine service processes).
+1. Scans `/proc/*/cmdline` for Windows executables running under any Wine/Proton
+   runtime (any argument ending in `.exe`, minus a blocklist of Wine service processes).
 2. Maps each executable to its Discord application id using Discord's
    [`applications/detectable`](https://discord.com/api/v9/applications/detectable)
    database (~10,000 games), cached locally and auto-refreshed every 7 days.
@@ -115,7 +129,8 @@ the database. Case and drive-letter/backslash paths are handled automatically.
 ## Limitations
 
 - Linux only (uses `/proc`).
-- Wine/Proton/umu games only — native Linux binaries are not scanned.
+- Windows games running via any Wine/Proton runtime only — native Linux binaries are
+  not scanned.
 - Only games present in Discord's detectable database (or with an override) show up.
 
 ## License
