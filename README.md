@@ -52,11 +52,24 @@ Hydra -> umu/wine -> Game.exe (running)
 
 ## Requirements
 
-- Linux with a running [arRPC](https://github.com/OpenAsar/arrpc) instance
-  (it owns the `$XDG_RUNTIME_DIR/discord-ipc-*` socket and forwards to your client).
+- **Linux** (uses `/proc`).
+- **Python 3** (stdlib only — no `pip install` needed).
+- A running [arRPC](https://github.com/OpenAsar/arrpc) instance — either the standalone
+  `arrpc` package, or a client's built-in arRPC. It owns the
+  `$XDG_RUNTIME_DIR/discord-ipc-*` socket and forwards activity to your client.
 - A Discord client that consumes arRPC, e.g. [Vesktop](https://github.com/Vencord/Vesktop)
-  with the **WebRichPresence (arRPC)** plugin enabled.
-- Python 3 (stdlib only — no `pip install` needed).
+  with the **WebRichPresence (arRPC)** plugin enabled, [ArmCord](https://github.com/ArmCord/ArmCord),
+  or Discord in a browser with the arRPC userscript/extension.
+
+> **Note:** the official native Discord desktop app does **not** use arRPC, so it is
+> not supported. It relies on Discord's own game detection, which is exactly what
+> misses Wine/Proton games — this tool only works with arRPC-based clients.
+
+### Flatpak / Snap sandboxing
+
+If arRPC or your client runs sandboxed, the `discord-ipc-*` socket can be hidden.
+For a Flatpak client you'll typically need a filesystem override such as
+`flatpak override --user --filesystem=xdg-run/discord-ipc-0 <app>`.
 
 ## Install
 
