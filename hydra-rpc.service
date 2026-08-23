@@ -1,0 +1,12 @@
+[Unit]
+Description=hydra-rpc - Discord Rich Presence for Hydra (Wine/umu) games
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hydra-rpc
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
