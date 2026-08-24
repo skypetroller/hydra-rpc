@@ -98,6 +98,32 @@ cp hydra-rpc.service ~/.config/systemd/user/
 systemctl --user enable --now hydra-rpc.service
 ```
 
+## Uninstall
+
+```sh
+# 1. Stop it (systemd users)
+systemctl --user disable --now hydra-rpc.service
+
+# 2. Remove the autostart entry and/or service file
+rm -f ~/.config/autostart/hydra-rpc.desktop
+rm -f ~/.config/systemd/user/hydra-rpc.service
+systemctl --user daemon-reload
+
+# 3. Remove the binary
+sudo rm -f /usr/local/bin/hydra-rpc    # or: rm -f ~/.local/bin/hydra-rpc
+
+# 4. Remove config and cached game database (optional)
+rm -rf ~/.config/hydra-rpc
+rm -rf ~/.cache/hydra-rpc
+```
+
+If you installed it another way (or are unsure), make sure no instance is still
+running and that any leftover `hydra-rpc` file is gone from your `PATH`:
+
+```sh
+pkill -f hydra-rpc
+```
+
 ## Configuration
 
 `~/.config/hydra-rpc/config.json` (created automatically on first run):
