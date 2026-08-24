@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Hydra Discord Rich Presence
-Comment=Reports Hydra (Wine/umu) games to Discord via arRPC
+Comment=Reports Windows games (Wine/Proton/umu) to Discord via arRPC
 Icon=applications-games
-Exec=hydra-rpc
+Exec=/usr/local/bin/hydra-rpc
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true

@@ -1,5 +1,5 @@
 [Unit]
-Description=hydra-rpc - Discord Rich Presence for Hydra (Wine/umu) games
+Description=hydra-rpc - Discord Rich Presence for Windows (Wine/Proton/umu) games
 After=default.target
 
 [Service]

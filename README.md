@@ -76,8 +76,13 @@ For a Flatpak client you'll typically need a filesystem override such as
 ```sh
 git clone https://github.com/skypetroller/hydra-rpc.git
 cd hydra-rpc
-sudo cp hydra-rpc /usr/local/bin/hydra-rpc   # or: cp hydra-rpc ~/.local/bin/
+sudo cp hydra-rpc /usr/local/bin/hydra-rpc
 ```
+
+> The provided `hydra-rpc.desktop` and `hydra-rpc.service` assume the binary is at
+> `/usr/local/bin/hydra-rpc`. If you install to `~/.local/bin` instead, edit the
+> `Exec=` / `ExecStart=` lines to match, and make sure `~/.local/bin` is on your `$PATH`
+> (autostart entries don't always pick it up).
 
 Run it once to generate the default config and cache the game database:
 
@@ -153,7 +158,7 @@ If a game isn't in Discord's database (or maps to the wrong title, e.g. a generi
 
 ## How it detects a game
 
-The running process for a Hydra game looks like one of these (the `.exe` is what
+The running process for a game looks like one of these (the `.exe` is what
 matters — the rest of the path is ignored):
 
 ```
