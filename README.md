@@ -19,6 +19,26 @@ in Discord's detectable database (or in your `overrides`), it will show up. Dete
 requires the game process to be visible in `/proc`; sandboxed or containerized runners
 that hide the game process may not be detectable.
 
+## Features
+
+- Automatic detection of Windows games launched through Proton, Proton GE, UMU-Proton,
+  Wine, and compatible Linux game launchers.
+- Multiple simultaneous Discord activities; set `max_activities` to `0` for all games or
+  `1` through `10` to limit the number reported.
+- Persisted session start times in `~/.cache/hydra-rpc/sessions.json` so restarts can keep
+  the elapsed time for an unchanged game process.
+- Generic activity-name templates using `{game_name}`, `{exe}`, and `{app_id}`.
+- Optional Discord fields such as `details`, `state`, `assets`, and `buttons` through
+  `rich_activity`.
+- Executable, Discord application ID, and case-insensitive game-name blocklists.
+- `--dry-run` detection preview and `--validate-config` setup checks.
+- Optional file logging with configurable log levels.
+- Automatic arRPC socket discovery with an exact `socket_path` override, cached path
+  preference, and exponential connection retry backoff.
+
+The tool intentionally reports games generically; it does not add launcher-specific
+labels or filter games by which runner started them.
+
 ## Support at a glance
 
 **Supported**
@@ -28,6 +48,7 @@ that hide the game process may not be detectable.
 - Vesktop/Vencord, ArmCord, or browser Discord setups that consume arRPC.
 - Games listed in Discord's detectable-applications database, plus manually configured
   executable overrides.
+- Multiple mapped activities, subject to how many Discord or the client chooses to render.
 
 **Not supported**
 
@@ -35,7 +56,6 @@ that hide the game process may not be detectable.
 - The official native Discord desktop client, because it does not consume arRPC.
 - Games whose process is hidden by a sandbox or PID namespace, unless the runner exposes
   the `.exe` in `/proc`.
-- More than one visible activity at the same time; one mapped game is selected.
 
 ## The problem
 
@@ -69,12 +89,14 @@ Hydra -> umu/wine -> Game.exe (running)
    [`applications/detectable`](https://discord.com/api/v9/applications/detectable)
    database (over 20,000 detectable applications; the live count can change), cached
    locally and auto-refreshed every 7 days.
-3. Sends `SET_ACTIVITY` to arRPC's IPC socket when a game starts or changes, refreshes
-   it periodically to detect lost connections, and clears it when the game exits.
+3. Sends one `SET_ACTIVITY` connection per detected game to arRPC, refreshes each
+   activity periodically to detect lost connections, and clears it when the game exits.
 
 The last working arRPC socket is tried first during the current run. If arRPC is
 unavailable, reconnect attempts back off from 1 second up to 60 seconds instead of
-retrying continuously at the normal scan interval.
+retrying continuously at the normal scan interval. Session start times are stored in
+`~/.cache/hydra-rpc/sessions.json`, allowing a watcher restart to preserve a running
+game's elapsed time when its process is unchanged.
 
 ## Requirements
 
@@ -147,6 +169,20 @@ systemctl --user status hydra-rpc.service
 journalctl --user -u hydra-rpc.service -f
 ```
 
+Preview detection without sending anything to Discord:
+
+```sh
+hydra-rpc --dry-run
+```
+
+The preview reports mapped games but never opens an arRPC activity connection.
+
+Validate the configuration, database, and arRPC socket without starting the watcher:
+
+```sh
+hydra-rpc --validate-config
+```
+
 Check that arRPC created an IPC socket:
 
 ```sh
@@ -167,6 +203,10 @@ per-socket connection timeout. The limit can be changed with `max_socket_attempt
 1 to 10; this is the total number of paths tried per cycle, including the cached path.
 Setting `socket_path` avoids discovery entirely and is recommended when you always use
 the same arRPC instance.
+
+If you enable file logging, set `log_file` to a path such as
+`~/.cache/hydra-rpc/hydra-rpc.log`. `log_level` accepts `debug`, `info`, `warning`, or
+`error`.
 
 If a game is reported as unrecognized, add an override as described below. To force
 a fresh detectable-applications database, remove the cache and restart:
@@ -223,7 +263,14 @@ Tests run automatically for pushes and pull requests through GitHub Actions.
 | `socket_dir`               | `""` (`$XDG_RUNTIME_DIR`)        | Directory used when searching for arRPC sockets  |
 | `socket_path`              | `""` (automatic)                 | Exact arRPC socket path; useful with multiple instances |
 | `max_socket_attempts`      | `3`                              | Maximum total automatic paths per cycle (1-10) |
+| `max_activities`           | `0` (all)                        | Maximum mapped games reported at once (0 or 1-10) |
 | `blocklist`                | Wine service processes           | Executables to never report as games             |
+| `blocklist_ids`            | `[]`                             | Discord application IDs never to report          |
+| `blocklist_names`          | `[]`                             | Game names never to report (case-insensitive)    |
+| `activity_template`        | `"{game_name}"`                 | Activity name template                           |
+| `rich_activity`             | `{}`                             | Additional Discord activity fields               |
+| `log_file`                 | `""`                             | Optional log file                                |
+| `log_level`                | `"info"`                         | Minimum log level                                |
 | `overrides`                | `{}`                             | Manual `"exe" -> {"id","name"}` mappings       |
 
 ### Overrides
@@ -237,6 +284,37 @@ If a game isn't in Discord's database (or maps to the wrong title, e.g. a generi
   "overrides": {
     "nw.exe": { "id": "425749842451496961", "name": "Game Dev Tycoon" }
   }
+}
+```
+
+### Activity customization
+
+`activity_template` supports `{game_name}`, `{exe}`, and `{app_id}`. Additional fields
+in `rich_activity` use the same placeholders and are passed through to Discord:
+
+```json
+{
+  "activity_template": "{game_name} [custom]",
+  "rich_activity": {
+    "details": "Playing {game_name}",
+    "state": "Executable: {exe}",
+    "assets": { "large_image": "cover" }
+  }
+}
+```
+
+The application ID remains the game's Discord application, so Discord clients may use
+the registered application name when rendering the activity.
+
+### Ignoring games
+
+Use `blocklist_ids` or case-insensitive `blocklist_names` when an executable-level
+blocklist is not specific enough:
+
+```json
+{
+  "blocklist_ids": ["123456789012345678"],
+  "blocklist_names": ["Demo Game"]
 }
 ```
 
@@ -260,8 +338,8 @@ the database. Case and drive-letter/backslash paths are handled automatically.
 - Windows games running via any Wine/Proton runtime only — native Linux binaries are
   not scanned.
 - Only games present in Discord's detectable database (or with an override) show up.
-- Only one activity is published at a time; shared executable names may require an
-  override to identify the correct game.
+- Multiple activities are published independently; set `max_activities` to limit them.
+- Shared executable names may require an override to identify the correct game.
 - Detection depends on the `.exe` appearing in a visible process command line; unusual
   wrappers or isolated PID namespaces may require a launcher-specific adjustment.
 

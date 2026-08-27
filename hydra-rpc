@@ -7,6 +7,7 @@ and pushes a "Playing <Game>" activity to arRPC's IPC socket so it shows up in
 Vesktop / any client connected to arRPC.
 """
 
+import argparse
 import json
 import math
 import os
@@ -25,6 +26,7 @@ CACHE_DIR = os.path.join(
 )
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DB_CACHE = os.path.join(CACHE_DIR, "detectable.json")
+SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 SOCKET_CONNECT_TIMEOUT = 1
@@ -32,6 +34,11 @@ RETRY_INITIAL_SECONDS = 1
 RETRY_MAX_SECONDS = 60
 DEFAULT_SOCKET_ATTEMPTS = 3
 MAX_SOCKET_PATHS = 10
+DEFAULT_MAX_ACTIVITIES = 0
+MAX_ACTIVITIES = 10
+LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
+CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
+LOG_FILE_HANDLE = None
 
 # Discords IPC framing: [type:int32][length:int32][json bytes]
 IPC_HANDSHAKE = 0
@@ -72,13 +79,56 @@ DEFAULT_CONFIG = {
     "socket_dir": "",
     "socket_path": "",
     "max_socket_attempts": DEFAULT_SOCKET_ATTEMPTS,
+    "max_activities": DEFAULT_MAX_ACTIVITIES,
+    "blocklist_ids": [],
+    "blocklist_names": [],
+    "activity_template": "{game_name}",
+    "rich_activity": {},
+    "log_file": "",
+    "log_level": "info",
     "blocklist": sorted(DEFAULT_BLOCKLIST),
     "overrides": {},
 }
 
 
-def log(msg):
-    print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
+def log(msg, level="info"):
+    if LOG_LEVELS.get(level, LOG_LEVELS["info"]) < CURRENT_LOG_LEVEL:
+        return
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    print(line, flush=True)
+    if LOG_FILE_HANDLE is not None:
+        try:
+            LOG_FILE_HANDLE.write(line + "\n")
+            LOG_FILE_HANDLE.flush()
+        except OSError:
+            pass
+
+
+def configure_logging(cfg):
+    global CURRENT_LOG_LEVEL, LOG_FILE_HANDLE
+    CURRENT_LOG_LEVEL = LOG_LEVELS[cfg["log_level"]]
+    path = cfg.get("log_file", "")
+    if not path:
+        return
+    path = os.path.expanduser(os.path.expandvars(path))
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        LOG_FILE_HANDLE = open(path, "a", buffering=1)
+    except OSError as e:
+        LOG_FILE_HANDLE = None
+        log(f"could not open log_file '{path}': {e}", "warning")
+
+
+def close_logging():
+    global LOG_FILE_HANDLE
+    if LOG_FILE_HANDLE is not None:
+        try:
+            LOG_FILE_HANDLE.close()
+        except OSError:
+            pass
+        LOG_FILE_HANDLE = None
 
 
 def load_config():
@@ -91,7 +141,7 @@ def load_config():
                 raise ValueError("top-level config must be an object")
             cfg.update(user)
         except Exception as e:
-            log(f"warning: could not read config ({e}); using defaults")
+            log(f"could not read config ({e}); using defaults", "warning")
 
     def normalise_number(key, minimum):
         default = DEFAULT_CONFIG[key]
@@ -101,7 +151,7 @@ def load_config():
                 raise ValueError
             cfg[key] = int(value) if value.is_integer() else value
         except (TypeError, ValueError):
-            log(f"warning: invalid {key}; using {default}")
+            log(f"invalid {key}; using {default}", "warning")
             cfg[key] = default
 
     def normalise_integer(key, minimum, maximum):
@@ -118,43 +168,70 @@ def load_config():
                 raise ValueError
             cfg[key] = value
         except (TypeError, ValueError, OverflowError):
-            log(f"warning: invalid {key}; using {default}")
+            log(f"invalid {key}; using {default}", "warning")
             cfg[key] = default
 
     normalise_number("poll_seconds", 0.1)
     normalise_number("activity_refresh_seconds", 1)
     normalise_number("db_ttl_seconds", 0)
     normalise_integer("max_socket_attempts", 1, MAX_SOCKET_PATHS)
+    normalise_integer("max_activities", 0, MAX_ACTIVITIES)
 
     if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
-        log("warning: invalid db_url; using the Discord detectable-applications endpoint")
+        log("invalid db_url; using the Discord detectable-applications endpoint", "warning")
         cfg["db_url"] = DB_URL
 
-    for key in ("socket_dir", "socket_path"):
+    for key in ("socket_dir", "socket_path", "log_file"):
         if not isinstance(cfg.get(key), str):
-            log(f"warning: invalid {key}; using automatic discovery")
+            log(f"invalid {key}; using the default", "warning")
             cfg[key] = ""
+
+    if not isinstance(cfg.get("activity_template"), str) or not cfg["activity_template"]:
+        log("invalid activity_template; using the game name", "warning")
+        cfg["activity_template"] = DEFAULT_CONFIG["activity_template"]
+
+    if not isinstance(cfg.get("rich_activity"), dict):
+        log("invalid rich_activity; ignoring it", "warning")
+        cfg["rich_activity"] = {}
+
+    log_level = str(cfg.get("log_level", "info")).lower()
+    if log_level not in LOG_LEVELS:
+        log("invalid log_level; using info", "warning")
+        log_level = "info"
+    cfg["log_level"] = log_level
+
+    def normalise_string_set(key, casefold=False):
+        raw = cfg.get(key, [])
+        if not isinstance(raw, (list, tuple, set)):
+            log(f"invalid {key}; using an empty list", "warning")
+            cfg[key] = set()
+            return
+        values = {str(x).strip() for x in raw if str(x).strip()}
+        cfg[key] = {x.casefold() for x in values} if casefold else values
+
+    normalise_string_set("blocklist_ids")
+    normalise_string_set("blocklist_names", casefold=True)
 
     raw_blocklist = cfg.get("blocklist", [])
     if isinstance(raw_blocklist, (list, tuple, set)):
         cfg["blocklist"] = {str(x).lower() for x in raw_blocklist if str(x)}
     else:
-        log("warning: invalid blocklist; using defaults")
+        log("invalid blocklist; using defaults", "warning")
         cfg["blocklist"] = set(DEFAULT_BLOCKLIST)
 
     overrides = {}
     raw_overrides = cfg.get("overrides") or {}
     if not isinstance(raw_overrides, dict):
-        log("warning: invalid overrides; ignoring them")
+        log("invalid overrides; ignoring them", "warning")
         raw_overrides = {}
     for exe, info in raw_overrides.items():
         if not isinstance(exe, str) or not exe.strip() or not isinstance(info, dict):
-            log("warning: ignoring malformed game override")
+            log("ignoring malformed game override", "warning")
             continue
         app_id = info.get("id")
         name = info.get("name")
         if not app_id or not name:
-            log(f"warning: ignoring incomplete override for '{exe}'")
+            log(f"ignoring incomplete override for '{exe}'", "warning")
             continue
         overrides[exe.lower()] = (str(app_id), str(name))
     cfg["overrides"] = overrides
@@ -168,7 +245,7 @@ def ensure_config(cfg):
             with open(CONFIG_PATH, "w") as f:
                 json.dump(DEFAULT_CONFIG, f, indent=2)
         except Exception as e:
-            log(f"warning: could not write default config ({e})")
+            log(f"could not write default config ({e})", "warning")
 
 
 def download_db(url):
@@ -204,7 +281,7 @@ def load_db(cfg):
                 with open(DB_CACHE, "r") as f:
                     cached = json.load(f)
         except Exception as e:
-            log(f"warning: failed to load cached db ({e})")
+            log(f"failed to load cached db ({e})", "warning")
 
     if cached is None:
         try:
@@ -218,12 +295,35 @@ def load_db(cfg):
             log(f"cached {len(db)} detectable applications")
             cached = db
         except Exception as e:
-            log(f"warning: could not download db ({e})")
+            log(f"could not download db ({e})", "warning")
             if os.path.exists(DB_CACHE):
                 with open(DB_CACHE, "r") as f:
                     cached = json.load(f)
 
     return build_index(cached) if cached else {}
+
+
+def load_sessions():
+    if not os.path.exists(SESSION_CACHE):
+        return {}
+    try:
+        with open(SESSION_CACHE, "r") as f:
+            sessions = json.load(f)
+        return sessions if isinstance(sessions, dict) else {}
+    except (OSError, ValueError) as e:
+        log(f"could not read session cache ({e})", "warning")
+        return {}
+
+
+def save_sessions(sessions):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = SESSION_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(sessions, f, indent=2, sort_keys=True)
+        os.replace(tmp, SESSION_CACHE)
+    except OSError as e:
+        log(f"could not save session cache ({e})", "warning")
 
 
 def runtime_dir(cfg):
@@ -343,17 +443,94 @@ class RPCClient:
         self.client_id = None
 
 
-def choose_game(exes, active, overrides, index):
-    candidates = sorted(exes)
-    if active in exes:
-        candidates.remove(active)
-        candidates.insert(0, active)
+RESERVED_ACTIVITY_FIELDS = {"application_id", "name", "timestamps", "type"}
 
+
+class TemplateValues(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def render_text(value, values):
+    if not isinstance(value, str):
+        return value
+    try:
+        return value.format_map(TemplateValues(values))
+    except (KeyError, ValueError):
+        return value
+
+
+def render_activity_value(value, values):
+    if isinstance(value, str):
+        return render_text(value, values)
+    if isinstance(value, list):
+        return [render_activity_value(item, values) for item in value]
+    if isinstance(value, dict):
+        return {key: render_activity_value(item, values) for key, item in value.items()}
+    return value
+
+
+def resolve_game(exe, info, overrides, index, cfg):
+    app = overrides.get(exe) or index.get(exe)
+    if not app:
+        return None
+
+    app_id, game_name = app
+    game_name_key = game_name.casefold()
+    if app_id in cfg["blocklist_ids"] or game_name_key in cfg["blocklist_names"]:
+        return None
+
+    if isinstance(info, dict):
+        pid = info["pid"]
+    else:
+        pid = info
+    values = {
+        "game_name": game_name,
+        "exe": exe,
+        "app_id": app_id,
+    }
+    activity = {
+        "application_id": app_id,
+        "name": render_text(cfg["activity_template"], values),
+    }
+    rich_activity = render_activity_value(cfg["rich_activity"], values)
+    for key, value in rich_activity.items():
+        if key not in RESERVED_ACTIVITY_FIELDS:
+            activity[key] = value
+
+    return {
+        "exe": exe,
+        "app_id": app_id,
+        "game_name": game_name,
+        "display_name": activity["name"],
+        "pid": pid,
+        "activity": activity,
+    }
+
+
+def choose_games(exes, active, overrides, index, cfg):
+    candidates = [exe for exe in active if exe in exes]
+    candidates.extend(exe for exe in sorted(exes) if exe not in candidates)
+    games = []
     for exe in candidates:
-        app = overrides.get(exe) or index.get(exe)
-        if app:
-            return exe, app[0], app[1], exes[exe]
-    return None
+        game = resolve_game(exe, exes[exe], overrides, index, cfg)
+        if game:
+            games.append(game)
+            if cfg["max_activities"] and len(games) >= cfg["max_activities"]:
+                break
+    return games
+
+
+def choose_game(exes, active, overrides, index):
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["blocklist_ids"] = set()
+    cfg["blocklist_names"] = set()
+    cfg["rich_activity"] = {}
+    game = choose_games(exes, [active] if active else [], overrides, index, cfg)
+    if not game:
+        return None
+    selected = game[0]
+    return selected["exe"], selected["app_id"], selected["display_name"], selected["pid"]
 
 
 def activity_due(last_sent, now, interval):
@@ -364,6 +541,72 @@ def retry_delay(failures):
     if failures <= 0:
         return 0
     return min(RETRY_MAX_SECONDS, RETRY_INITIAL_SECONDS * 2 ** (failures - 1))
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Report Wine/Proton games to Discord through arRPC."
+    )
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="detect and log games without sending Discord activity",
+    )
+    modes.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="validate settings, load the game database, and check arRPC",
+    )
+    return parser.parse_args(argv)
+
+
+def validate_config(cfg, index):
+    base = runtime_dir(cfg) + "/discord-ipc"
+    client = RPCClient(
+        base,
+        cfg.get("socket_path", ""),
+        cfg["max_socket_attempts"],
+    )
+    for path in client.candidate_paths():
+        client.path = path
+        try:
+            probe = client._connect()
+            probe.close()
+            log(f"config valid; loaded {len(index)} executable mappings")
+            log(f"arRPC socket ready: {path}")
+            return True
+        except OSError:
+            continue
+    log(
+        f"config valid; loaded {len(index)} executable mappings, "
+        "but no arRPC socket was found",
+        "warning",
+    )
+    return False
+
+
+def close_state(state):
+    client = state["client"]
+    if client.sock is not None:
+        try:
+            client.send("SET_ACTIVITY", {"activity": None, "pid": 0})
+        except OSError:
+            pass
+    client.close()
+
+
+def session_start(sessions, game):
+    record = sessions.get(game["exe"])
+    now_ms = int(time.time() * 1000)
+    if isinstance(record, dict):
+        try:
+            start_ms = int(record["start_ms"])
+            if int(record["pid"]) == game["pid"] and 0 < start_ms <= now_ms:
+                return start_ms
+        except (KeyError, TypeError, ValueError):
+            pass
+    return now_ms
 
 
 def detect_exes(blocklist):
@@ -391,135 +634,166 @@ def detect_exes(blocklist):
             base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
             if not base or base in blocklist:
                 continue
-            if base not in found:
-                found[base] = int(pid)
+            found.setdefault(base, {"pid": int(pid), "path": arg})
     return found
 
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     cfg = load_config()
+    configure_logging(cfg)
     ensure_config(cfg)
     index = load_db(cfg)
     if not index:
-        log("error: no detectable database available; cannot map games")
+        log("no detectable database available; games will need overrides", "error")
     log(f"loaded {len(index)} executable mappings")
 
+    if args.validate_config:
+        valid = validate_config(cfg, index)
+        close_logging()
+        return 0 if valid else 1
+
+    sessions = load_sessions()
     base = runtime_dir(cfg) + "/discord-ipc"
-    client = RPCClient(
-        base,
-        cfg.get("socket_path", ""),
-        cfg["max_socket_attempts"],
-    )
-
-    active = None
-    start_ms = None
-    last_activity_sent = None
-    connection_failures = 0
-    next_connection_attempt = 0.0
-
-    def clear_presence():
-        nonlocal active, start_ms, last_activity_sent
-        if client.sock is not None:
-            try:
-                client.send("SET_ACTIVITY", {"activity": None, "pid": 0})
-            except OSError:
-                pass
-        client.close()
-        active = None
-        start_ms = None
-        last_activity_sent = None
+    states = {}
+    sessions_dirty = False
+    dry_signature = None
+    seen_unknown = set()
 
     def stop(*_args):
         log("shutting down")
-        clear_presence()
+        for state in states.values():
+            close_state(state)
+        save_sessions(sessions)
+        close_logging()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    warned_no_socket = False
-    seen_unknown = set()
     while True:
         try:
             exes = detect_exes(cfg["blocklist"])
-
             for exe in sorted(exes):
                 if not (cfg["overrides"].get(exe) or index.get(exe)) and exe not in seen_unknown:
                     seen_unknown.add(exe)
-                    log(f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})")
+                    log(f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})", "warning")
 
-            chosen = choose_game(exes, active, cfg["overrides"], index)
+            games = choose_games(exes, states.keys(), cfg["overrides"], index, cfg)
 
-            if chosen is None:
-                if active is not None:
-                    log("game exited, clearing presence")
-                    clear_presence()
-                connection_failures = 0
-                next_connection_attempt = 0.0
-                if client.sock is None and not warned_no_socket:
-                    warned_no_socket = True
+            if args.dry_run:
+                signature = tuple(
+                    (game["exe"], game["display_name"])
+                    for game in games
+                )
+                if signature != dry_signature:
+                    if games:
+                        for game in games:
+                            log(
+                                f"dry-run: detected game: {game['display_name']} "
+                                f"({game['exe']}) (would report)"
+                            )
+                    else:
+                        log("dry-run: no supported games detected")
+                    dry_signature = signature
                 time.sleep(cfg["poll_seconds"])
                 continue
 
-            warned_no_socket = False
-            exe, app_id, name, pid = chosen
+            selected = {game["exe"]: game for game in games}
+            for exe in list(states):
+                if exe not in selected:
+                    log(f"game exited: {states[exe]['display_name']}; clearing presence")
+                    close_state(states.pop(exe))
+                    if sessions.pop(exe, None) is not None:
+                        sessions_dirty = True
 
-            if active != exe:
-                now = time.monotonic()
-                if now < next_connection_attempt:
-                    time.sleep(min(cfg["poll_seconds"], next_connection_attempt - now))
-                    continue
-                log(f"detected game: {name} ({exe}) app_id={app_id}")
-                try:
-                    client.connect(app_id)
-                except OSError as e:
-                    target = client.path or f"{base}-0..{cfg['max_socket_attempts'] - 1}"
-                    connection_failures += 1
-                    delay = retry_delay(connection_failures)
-                    next_connection_attempt = time.monotonic() + delay
+            for exe, game in selected.items():
+                state = states.get(exe)
+                if state is None:
+                    start_ms = session_start(sessions, game)
+                    previous_session = sessions.get(exe)
+                    sessions[exe] = {"start_ms": start_ms, "pid": game["pid"]}
+                    sessions_dirty |= previous_session != sessions[exe]
+                    state = {
+                        **game,
+                        "start_ms": start_ms,
+                        "client": RPCClient(
+                            base,
+                            cfg.get("socket_path", ""),
+                            cfg["max_socket_attempts"],
+                        ),
+                        "last_activity_sent": None,
+                        "connection_failures": 0,
+                        "next_connection_attempt": 0.0,
+                    }
+                    states[exe] = state
                     log(
-                        f"could not connect to arRPC at {target} ({e}); "
-                        f"retrying in {delay}s"
+                        f"detected game: {game['display_name']} ({exe}) "
+                        f"app_id={game['app_id']}"
                     )
-                    if active is not None:
-                        clear_presence()
-                    time.sleep(delay)
-                    continue
-                connection_failures = 0
-                next_connection_attempt = 0.0
-                active = exe
-                start_ms = int(time.time() * 1000)
-                last_activity_sent = None
+                else:
+                    metadata_changed = any(
+                        state[key] != game[key]
+                        for key in ("app_id", "display_name", "activity")
+                    )
+                    state.update(game)
+                    if metadata_changed:
+                        state["client"].close()
+                        state["last_activity_sent"] = None
+                        state["connection_failures"] = 0
+                        state["next_connection_attempt"] = 0.0
 
-            # arRPC retains the activity; refresh periodically to detect a dead connection.
-            now = time.monotonic()
-            if activity_due(last_activity_sent, now, cfg["activity_refresh_seconds"]):
-                activity = {
-                    "application_id": app_id,
-                    "name": name,
-                    "timestamps": {"start": start_ms},
-                }
-                try:
-                    client.send("SET_ACTIVITY", {"activity": activity, "pid": pid})
-                    last_activity_sent = now
-                except OSError:
-                    log("arRPC connection lost, will reconnect")
-                    active = None
-                    last_activity_sent = None
-                    client.close()
-                    connection_failures += 1
-                    delay = retry_delay(connection_failures)
-                    next_connection_attempt = time.monotonic() + delay
-                    log(f"retrying arRPC in {delay}s")
-                    time.sleep(delay)
-                    continue
+                now = time.monotonic()
+                if state["client"].sock is None:
+                    if now < state["next_connection_attempt"]:
+                        continue
+                    try:
+                        state["client"].connect(state["app_id"])
+                    except OSError as e:
+                        state["connection_failures"] += 1
+                        delay = retry_delay(state["connection_failures"])
+                        state["next_connection_attempt"] = time.monotonic() + delay
+                        target = state["client"].path or f"{base}-0..{cfg['max_socket_attempts'] - 1}"
+                        log(
+                            f"could not connect to arRPC at {target} ({e}); "
+                            f"retrying in {delay}s",
+                            "warning",
+                        )
+                        continue
+                    state["connection_failures"] = 0
+                    state["next_connection_attempt"] = 0.0
+                    state["last_activity_sent"] = None
 
+                now = time.monotonic()
+                if activity_due(
+                    state["last_activity_sent"],
+                    now,
+                    cfg["activity_refresh_seconds"],
+                ):
+                    activity = dict(state["activity"])
+                    activity["timestamps"] = {"start": state["start_ms"]}
+                    try:
+                        state["client"].send(
+                            "SET_ACTIVITY",
+                            {"activity": activity, "pid": state["pid"]},
+                        )
+                        state["last_activity_sent"] = now
+                    except OSError:
+                        log("arRPC connection lost, will reconnect", "warning")
+                        state["client"].close()
+                        state["connection_failures"] += 1
+                        delay = retry_delay(state["connection_failures"])
+                        state["next_connection_attempt"] = time.monotonic() + delay
+
+            if sessions_dirty:
+                save_sessions(sessions)
+                sessions_dirty = False
             time.sleep(cfg["poll_seconds"])
 
         except Exception as e:
-            log(f"unexpected error: {e}")
+            log(f"unexpected error: {e}", "error")
             time.sleep(cfg["poll_seconds"])
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

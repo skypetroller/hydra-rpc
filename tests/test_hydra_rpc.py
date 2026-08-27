@@ -46,12 +46,95 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(choose_game(exes, None, {}, index)[0], "alpha.exe")
         self.assertEqual(choose_game(exes, "beta.exe", {}, index)[0], "beta.exe")
 
-    def test_activity_refresh_is_throttled(self):
-        activity_due = NAMESPACE["activity_due"]
+    def test_choose_games_supports_multiple_activities(self):
+        exes = {
+            "alpha.exe": {"pid": 10, "path": "Alpha.exe"},
+            "beta.exe": {"pid": 20, "path": "Beta.exe"},
+        }
+        index = {
+            "alpha.exe": ("1", "Alpha"),
+            "beta.exe": ("2", "Beta"),
+        }
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
 
-        self.assertTrue(activity_due(None, 100, 60))
-        self.assertFalse(activity_due(100, 159, 60))
-        self.assertTrue(activity_due(100, 160, 60))
+        choose_games = NAMESPACE["choose_games"]
+        games = choose_games(exes, [], {}, index, cfg)
+
+        self.assertEqual([game["exe"] for game in games], ["alpha.exe", "beta.exe"])
+
+        cfg["max_activities"] = 1
+        self.assertEqual(len(choose_games(exes, [], {}, index, cfg)), 1)
+
+        games_without_closed = choose_games(exes, ["closed.exe"], {}, index, cfg)
+        self.assertEqual([game["exe"] for game in games_without_closed], ["alpha.exe"])
+
+    def test_templates_and_rich_activity_are_generic(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["activity_template"] = "{game_name} [{exe}]"
+        cfg["rich_activity"] = {
+            "details": "Playing {game_name}",
+            "state": "Executable: {exe}",
+            "assets": {"large_image": "cover"},
+        }
+        game = NAMESPACE["resolve_game"](
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+
+        self.assertEqual(game["display_name"], "Example [example.exe]")
+        self.assertEqual(game["activity"]["details"], "Playing Example")
+        self.assertEqual(game["activity"]["state"], "Executable: example.exe")
+        self.assertEqual(game["activity"]["assets"], {"large_image": "cover"})
+
+    def test_game_blocklists_are_applied_after_mapping(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = {"123"}
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        resolve_game = NAMESPACE["resolve_game"]
+        args = ("example.exe", {"pid": 42, "path": "Example.exe"}, {}, {"example.exe": ("123", "Example")}, cfg)
+
+        self.assertIsNone(resolve_game(*args))
+
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = {"example"}
+        self.assertIsNone(resolve_game(*args))
+
+    def test_session_start_reuses_matching_pid(self):
+        start_ms = 123456789
+        sessions = {"example.exe": {"start_ms": start_ms, "pid": 42}}
+        game = {"exe": "example.exe", "pid": 42}
+
+        self.assertEqual(NAMESPACE["session_start"](sessions, game), start_ms)
+
+    def test_cli_modes_parse(self):
+        parse_args = NAMESPACE["parse_args"]
+        self.assertTrue(parse_args(["--dry-run"]).dry_run)
+        self.assertTrue(parse_args(["--validate-config"]).validate_config)
+
+    def test_file_logging_writes_a_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "hydra-rpc.log"
+            old_level = NAMESPACE["CURRENT_LOG_LEVEL"]
+            try:
+                NAMESPACE["configure_logging"]({
+                    "log_file": str(log_path),
+                    "log_level": "info",
+                })
+                NAMESPACE["log"]("test log entry")
+            finally:
+                NAMESPACE["close_logging"]()
+                NAMESPACE["CURRENT_LOG_LEVEL"] = old_level
+
+            self.assertIn("test log entry", log_path.read_text())
 
     def test_config_invalid_values_fall_back_safely(self):
         with tempfile.TemporaryDirectory() as directory:
