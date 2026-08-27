@@ -69,7 +69,8 @@ Hydra -> umu/wine -> Game.exe (running)
    [`applications/detectable`](https://discord.com/api/v9/applications/detectable)
    database (over 20,000 detectable applications; the live count can change), cached
    locally and auto-refreshed every 7 days.
-3. Sends `SET_ACTIVITY` to arRPC's IPC socket, and clears it when the game exits.
+3. Sends `SET_ACTIVITY` to arRPC's IPC socket when a game starts or changes, refreshes
+   it periodically to detect lost connections, and clears it when the game exits.
 
 ## Requirements
 
@@ -203,15 +204,16 @@ Tests run automatically for pushes and pull requests through GitHub Actions.
 
 `~/.config/hydra-rpc/config.json` (created automatically on first run):
 
-| Key               | Default                          | Description                                      |
-| ----------------- | -------------------------------- | ------------------------------------------------ |
-| `poll_seconds`    | `5`                              | How often to rescan `/proc`                      |
-| `db_url`          | Discord detectable endpoint       | Source of the executable -> app-id database      |
-| `db_ttl_seconds`  | `604800` (7 days)                 | How long the cached database is considered fresh |
-| `socket_dir`      | `""` (`$XDG_RUNTIME_DIR`)         | Directory used when searching for arRPC sockets  |
-| `socket_path`     | `""` (automatic)                  | Exact arRPC socket path; useful with multiple instances |
-| `blocklist`       | Wine service processes            | Executables to never report as games             |
-| `overrides`       | `{}`                             | Manual `"exe" -> {"id","name"}` mappings         |
+| Key                        | Default                          | Description                                      |
+| -------------------------- | -------------------------------- | ------------------------------------------------ |
+| `poll_seconds`             | `5`                              | How often to rescan `/proc`                      |
+| `activity_refresh_seconds` | `60`                             | How often to refresh an active presence          |
+| `db_url`                   | Discord detectable endpoint      | Source of the executable -> app-id database      |
+| `db_ttl_seconds`           | `604800` (7 days)                | How long the cached database is considered fresh |
+| `socket_dir`               | `""` (`$XDG_RUNTIME_DIR`)        | Directory used when searching for arRPC sockets  |
+| `socket_path`              | `""` (automatic)                 | Exact arRPC socket path; useful with multiple instances |
+| `blocklist`                | Wine service processes           | Executables to never report as games             |
+| `overrides`                | `{}`                             | Manual `"exe" -> {"id","name"}` mappings       |
 
 ### Overrides
 

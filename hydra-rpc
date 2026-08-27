@@ -61,6 +61,7 @@ DEFAULT_BLOCKLIST = {
 
 DEFAULT_CONFIG = {
     "poll_seconds": 5,
+    "activity_refresh_seconds": 60,
     "db_url": DB_URL,
     "db_ttl_seconds": 7 * 24 * 3600,
     "socket_dir": "",
@@ -98,6 +99,7 @@ def load_config():
             cfg[key] = default
 
     normalise_number("poll_seconds", 0.1)
+    normalise_number("activity_refresh_seconds", 1)
     normalise_number("db_ttl_seconds", 0)
 
     if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
@@ -254,31 +256,31 @@ class RPCClient:
     def _connect(self):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(5)
-        s.connect(self.path)
-        return s
-
-    def find_path(self, base):
-        for i in range(10):
-            p = f"{base}-{i}"
-            try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                s.settimeout(1)
-                s.connect(p)
-                s.close()
-                return p
-            except OSError:
-                continue
-        return f"{base}-0"
+        try:
+            s.connect(self.path)
+            return s
+        except OSError:
+            s.close()
+            raise
 
     def connect(self, client_id):
         if self.sock is not None:
             self.close()
-        self.path = self.socket_path or self.find_path(self.base)
-        try:
-            self.sock = self._connect()
-        except OSError as e:
-            self.sock = None
-            raise
+        paths = [self.socket_path] if self.socket_path else [
+            f"{self.base}-{i}" for i in range(10)
+        ]
+        last_error = None
+        for path in paths:
+            self.path = path
+            try:
+                self.sock = self._connect()
+                break
+            except OSError as e:
+                last_error = e
+                self.sock = None
+        if self.sock is None:
+            self.path = self.socket_path or None
+            raise last_error or OSError("no arRPC socket found")
         self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
         read_frame(self.sock, 2)  # drain READY
         self.client_id = client_id
@@ -313,6 +315,10 @@ def choose_game(exes, active, overrides, index):
     return None
 
 
+def activity_due(last_sent, now, interval):
+    return last_sent is None or now - last_sent >= interval
+
+
 def detect_exes(blocklist):
     found = {}
     try:
@@ -331,12 +337,10 @@ def detect_exes(blocklist):
             continue
         parts = raw.split(b"\0")
         for part in parts:
-            if not part:
+            part = part.rstrip()
+            if len(part) < 4 or part[-4:].lower() != b".exe":
                 continue
             arg = part.decode("utf-8", "ignore")
-            low = arg.lower()
-            if not low.endswith(".exe"):
-                continue
             base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
             if not base or base in blocklist:
                 continue
@@ -358,9 +362,10 @@ def main():
 
     active = None
     start_ms = None
+    last_activity_sent = None
 
     def clear_presence():
-        nonlocal active, start_ms
+        nonlocal active, start_ms, last_activity_sent
         if client.sock is not None:
             try:
                 client.send("SET_ACTIVITY", {"activity": None, "pid": 0})
@@ -369,6 +374,7 @@ def main():
         client.close()
         active = None
         start_ms = None
+        last_activity_sent = None
 
     def stop(*_args):
         log("shutting down")
@@ -416,18 +422,24 @@ def main():
                     continue
                 active = exe
                 start_ms = int(time.time() * 1000)
+                last_activity_sent = None
 
-            activity = {
-                "application_id": app_id,
-                "name": name,
-                "timestamps": {"start": start_ms},
-            }
-            try:
-                client.send("SET_ACTIVITY", {"activity": activity, "pid": pid})
-            except OSError:
-                log("arRPC connection lost, will reconnect")
-                active = None
-                client.close()
+            # arRPC retains the activity; refresh periodically to detect a dead connection.
+            now = time.monotonic()
+            if activity_due(last_activity_sent, now, cfg["activity_refresh_seconds"]):
+                activity = {
+                    "application_id": app_id,
+                    "name": name,
+                    "timestamps": {"start": start_ms},
+                }
+                try:
+                    client.send("SET_ACTIVITY", {"activity": activity, "pid": pid})
+                    last_activity_sent = now
+                except OSError:
+                    log("arRPC connection lost, will reconnect")
+                    active = None
+                    last_activity_sent = None
+                    client.close()
 
             time.sleep(cfg["poll_seconds"])
 

@@ -46,11 +46,19 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(choose_game(exes, None, {}, index)[0], "alpha.exe")
         self.assertEqual(choose_game(exes, "beta.exe", {}, index)[0], "beta.exe")
 
+    def test_activity_refresh_is_throttled(self):
+        activity_due = NAMESPACE["activity_due"]
+
+        self.assertTrue(activity_due(None, 100, 60))
+        self.assertFalse(activity_due(100, 159, 60))
+        self.assertTrue(activity_due(100, 160, 60))
+
     def test_config_invalid_values_fall_back_safely(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             config_path.write_text(json.dumps({
                 "poll_seconds": "invalid",
+                "activity_refresh_seconds": "invalid",
                 "db_ttl_seconds": -1,
                 "db_url": 123,
                 "socket_dir": 123,
@@ -67,6 +75,7 @@ class HydraRpcTests(unittest.TestCase):
                 NAMESPACE["CONFIG_PATH"] = old_path
 
         self.assertEqual(config["poll_seconds"], 5)
+        self.assertEqual(config["activity_refresh_seconds"], 60)
         self.assertEqual(config["db_ttl_seconds"], 604800)
         self.assertEqual(config["db_url"], NAMESPACE["DB_URL"])
         self.assertEqual(config["socket_dir"], "")
