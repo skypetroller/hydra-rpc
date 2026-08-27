@@ -7,7 +7,7 @@ or any other Wine-based launcher.
 ## Compatibility
 
 `hydra-rpc` is **launcher-agnostic**: it doesn't care what compatibility layer started
-the game, it just looks for a running `.exe`. It works with all of the following:
+the game, it just looks for a running `.exe`. It is designed to work with:
 
 - **Proton** (standard) and **Proton GE**
 - **UMU-Proton** (Hydra's default)
@@ -15,7 +15,9 @@ the game, it just looks for a running `.exe`. It works with all of the following
 - **Lutris**, **Bottles**, **Heroic Games Launcher**, **Rare**
 
 As long as the game is a Windows `.exe` (not a native Linux binary) and its basename is
-in Discord's detectable database (or in your `overrides`), it will show up.
+in Discord's detectable database (or in your `overrides`), it will show up. Detection
+requires the game process to be visible in `/proc`; sandboxed or containerized runners
+that hide the game process may not be detectable.
 
 ## The problem
 
@@ -169,6 +171,16 @@ If you started a detached manual copy, stop only the hydra-rpc process:
 pkill -f '[/]hydra-rpc$'
 ```
 
+## Development
+
+Run the dependency-free test suite locally:
+
+```sh
+python3 -m unittest discover --start-directory tests --verbose
+```
+
+Tests run automatically for pushes and pull requests through GitHub Actions.
+
 ## Configuration
 
 `~/.config/hydra-rpc/config.json` (created automatically on first run):
@@ -219,6 +231,8 @@ the database. Case and drive-letter/backslash paths are handled automatically.
 - Only games present in Discord's detectable database (or with an override) show up.
 - Only one activity is published at a time; shared executable names may require an
   override to identify the correct game.
+- Detection depends on the `.exe` appearing in a visible process command line; unusual
+  wrappers or isolated PID namespaces may require a launcher-specific adjustment.
 
 ## License
 

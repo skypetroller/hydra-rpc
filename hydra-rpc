@@ -8,6 +8,7 @@ Vesktop / any client connected to arRPC.
 """
 
 import json
+import math
 import os
 import signal
 import socket
@@ -79,13 +80,57 @@ def load_config():
         try:
             with open(CONFIG_PATH, "r") as f:
                 user = json.load(f)
+            if not isinstance(user, dict):
+                raise ValueError("top-level config must be an object")
             cfg.update(user)
         except Exception as e:
             log(f"warning: could not read config ({e}); using defaults")
-    cfg["blocklist"] = {x.lower() for x in cfg.get("blocklist", [])}
+
+    def normalise_number(key, minimum):
+        default = DEFAULT_CONFIG[key]
+        try:
+            value = float(cfg.get(key, default))
+            if not math.isfinite(value) or value < minimum:
+                raise ValueError
+            cfg[key] = int(value) if value.is_integer() else value
+        except (TypeError, ValueError):
+            log(f"warning: invalid {key}; using {default}")
+            cfg[key] = default
+
+    normalise_number("poll_seconds", 0.1)
+    normalise_number("db_ttl_seconds", 0)
+
+    if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
+        log("warning: invalid db_url; using the Discord detectable-applications endpoint")
+        cfg["db_url"] = DB_URL
+
+    for key in ("socket_dir", "socket_path"):
+        if not isinstance(cfg.get(key), str):
+            log(f"warning: invalid {key}; using automatic discovery")
+            cfg[key] = ""
+
+    raw_blocklist = cfg.get("blocklist", [])
+    if isinstance(raw_blocklist, (list, tuple, set)):
+        cfg["blocklist"] = {str(x).lower() for x in raw_blocklist if str(x)}
+    else:
+        log("warning: invalid blocklist; using defaults")
+        cfg["blocklist"] = set(DEFAULT_BLOCKLIST)
+
     overrides = {}
-    for exe, info in (cfg.get("overrides") or {}).items():
-        overrides[exe.lower()] = (str(info["id"]), str(info["name"]))
+    raw_overrides = cfg.get("overrides") or {}
+    if not isinstance(raw_overrides, dict):
+        log("warning: invalid overrides; ignoring them")
+        raw_overrides = {}
+    for exe, info in raw_overrides.items():
+        if not isinstance(exe, str) or not exe.strip() or not isinstance(info, dict):
+            log("warning: ignoring malformed game override")
+            continue
+        app_id = info.get("id")
+        name = info.get("name")
+        if not app_id or not name:
+            log(f"warning: ignoring incomplete override for '{exe}'")
+            continue
+        overrides[exe.lower()] = (str(app_id), str(name))
     cfg["overrides"] = overrides
     return cfg
 
@@ -255,6 +300,19 @@ class RPCClient:
         self.client_id = None
 
 
+def choose_game(exes, active, overrides, index):
+    candidates = sorted(exes)
+    if active in exes:
+        candidates.remove(active)
+        candidates.insert(0, active)
+
+    for exe in candidates:
+        app = overrides.get(exe) or index.get(exe)
+        if app:
+            return exe, app[0], app[1], exes[exe]
+    return None
+
+
 def detect_exes(blocklist):
     found = {}
     try:
@@ -326,16 +384,12 @@ def main():
         try:
             exes = detect_exes(cfg["blocklist"])
 
-            chosen = None
-            if exes:
-                for exe in sorted(exes):
-                    app = cfg["overrides"].get(exe) or index.get(exe)
-                    if app:
-                        chosen = (exe, app[0], app[1], exes[exe])
-                        break
-                    if exe not in seen_unknown:
-                        seen_unknown.add(exe)
-                        log(f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})")
+            for exe in sorted(exes):
+                if not (cfg["overrides"].get(exe) or index.get(exe)) and exe not in seen_unknown:
+                    seen_unknown.add(exe)
+                    log(f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})")
+
+            chosen = choose_game(exes, active, cfg["overrides"], index)
 
             if chosen is None:
                 if active is not None:

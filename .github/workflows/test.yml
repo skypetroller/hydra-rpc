@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run Python tests
+        run: python -m unittest discover --start-directory tests --verbose
+      - name: Validate Python syntax
+        run: python -B -c "import ast; ast.parse(open('hydra-rpc').read())"
+      - name: Validate desktop entry
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y desktop-file-utils
+          desktop-file-validate hydra-rpc.desktop
