@@ -96,11 +96,11 @@ class HydraRpcTests(unittest.TestCase):
 
     def test_socket_candidates_prefer_last_working_path(self):
         client = NAMESPACE["RPCClient"]("/run/user/4242/discord-ipc", max_socket_attempts=4)
-        client.last_path = "/run/user/4242/discord-ipc-3"
+        client.last_path = "/run/user/4242/discord-ipc-9"
 
         candidates = client.candidate_paths()
 
-        self.assertEqual(candidates[0], "/run/user/4242/discord-ipc-3")
+        self.assertEqual(candidates[0], "/run/user/4242/discord-ipc-9")
         self.assertEqual(len(candidates), 4)
         self.assertEqual(len(set(candidates)), 4)
 

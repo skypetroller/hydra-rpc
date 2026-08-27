@@ -298,11 +298,12 @@ class RPCClient:
         paths = []
         if self.last_path:
             paths.append(self.last_path)
-        paths.extend(
-            f"{self.base}-{i}"
-            for i in range(self.max_socket_attempts)
-            if f"{self.base}-{i}" not in paths
-        )
+        for i in range(self.max_socket_attempts):
+            if len(paths) >= self.max_socket_attempts:
+                break
+            path = f"{self.base}-{i}"
+            if path not in paths:
+                paths.append(path)
         return paths
 
     def connect(self, client_id):
