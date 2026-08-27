@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "db_url": DB_URL,
     "db_ttl_seconds": 7 * 24 * 3600,
     "socket_dir": "",
+    "socket_path": "",
     "blocklist": sorted(DEFAULT_BLOCKLIST),
     "overrides": {},
 }
@@ -157,7 +158,7 @@ def load_db(cfg):
 def runtime_dir(cfg):
     d = cfg.get("socket_dir") or os.environ.get("XDG_RUNTIME_DIR")
     if d:
-        return d
+        return os.path.expanduser(os.path.expandvars(d))
     return f"/run/user/{os.getuid()}"
 
 
@@ -196,8 +197,10 @@ def read_frame(sock, timeout):
 
 
 class RPCClient:
-    def __init__(self, base):
+    def __init__(self, base, socket_path=""):
         self.base = base
+        socket_path = str(socket_path or "")
+        self.socket_path = os.path.expanduser(os.path.expandvars(socket_path))
         self.path = None
         self.sock = None
         self.client_id = None
@@ -225,7 +228,7 @@ class RPCClient:
     def connect(self, client_id):
         if self.sock is not None:
             self.close()
-        self.path = self.find_path(self.base)
+        self.path = self.socket_path or self.find_path(self.base)
         try:
             self.sock = self._connect()
         except OSError as e:
@@ -293,7 +296,7 @@ def main():
     log(f"loaded {len(index)} executable mappings")
 
     base = runtime_dir(cfg) + "/discord-ipc"
-    client = RPCClient(base)
+    client = RPCClient(base, cfg.get("socket_path", ""))
 
     active = None
     start_ms = None
@@ -351,7 +354,8 @@ def main():
                 try:
                     client.connect(app_id)
                 except OSError as e:
-                    log(f"could not connect to arRPC ({e}); is arRPC running?")
+                    target = client.path or f"{base}-0..9"
+                    log(f"could not connect to arRPC at {target} ({e}); is arRPC running?")
                     if active is not None:
                         clear_presence()
                     time.sleep(cfg["poll_seconds"])

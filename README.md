@@ -47,7 +47,8 @@ Hydra -> umu/wine -> Game.exe (running)
    runtime (any argument ending in `.exe`, minus a blocklist of Wine service processes).
 2. Maps each executable to its Discord application id using Discord's
    [`applications/detectable`](https://discord.com/api/v9/applications/detectable)
-   database (~10,000 games), cached locally and auto-refreshed every 7 days.
+   database (over 20,000 detectable applications; the live count can change), cached
+   locally and auto-refreshed every 7 days.
 3. Sends `SET_ACTIVITY` to arRPC's IPC socket, and clears it when the game exits.
 
 ## Requirements
@@ -103,6 +104,46 @@ cp hydra-rpc.service ~/.config/systemd/user/
 systemctl --user enable --now hydra-rpc.service
 ```
 
+## Troubleshooting
+
+Run the program in a terminal to see its diagnostics:
+
+```sh
+/usr/local/bin/hydra-rpc  # or: ~/.local/bin/hydra-rpc
+```
+
+You should see `loaded ... executable mappings`, followed by `detected game: ...`
+when a supported game is running. Stop a foreground copy with `Ctrl-C`.
+
+For a systemd installation, inspect its status and live logs:
+
+```sh
+systemctl --user status hydra-rpc.service
+journalctl --user -u hydra-rpc.service -f
+```
+
+Check that arRPC created an IPC socket:
+
+```sh
+ls -l "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/discord-ipc-*
+```
+
+If multiple arRPC instances are running, set `socket_path` to the exact socket in
+`~/.config/hydra-rpc/config.json`. The value supports `~` and environment variables:
+
+```json
+{
+  "socket_path": "${XDG_RUNTIME_DIR}/discord-ipc-0"
+}
+```
+
+If a game is reported as unrecognized, add an override as described below. To force
+a fresh detectable-applications database, remove the cache and restart:
+
+```sh
+rm -f ~/.cache/hydra-rpc/detectable.json
+```
+
 ## Uninstall
 
 ```sh
@@ -122,11 +163,10 @@ rm -rf ~/.config/hydra-rpc
 rm -rf ~/.cache/hydra-rpc
 ```
 
-If you installed it another way (or are unsure), make sure no instance is still
-running and that any leftover `hydra-rpc` file is gone from your `PATH`:
+If you started a detached manual copy, stop only the hydra-rpc process:
 
 ```sh
-pkill -f hydra-rpc
+pkill -f '[/]hydra-rpc$'
 ```
 
 ## Configuration
@@ -137,9 +177,10 @@ pkill -f hydra-rpc
 | ----------------- | -------------------------------- | ------------------------------------------------ |
 | `poll_seconds`    | `5`                              | How often to rescan `/proc`                      |
 | `db_url`          | Discord detectable endpoint       | Source of the executable -> app-id database      |
-| `db_ttl_seconds`  | `604800` (7 days)                | How long the cached database is considered fresh |
-| `socket_dir`      | `""` (`$XDG_RUNTIME_DIR`)        | Directory containing arRPC's `discord-ipc-*`     |
-| `blocklist`       | Wine service processes           | Executables to never report as games             |
+| `db_ttl_seconds`  | `604800` (7 days)                 | How long the cached database is considered fresh |
+| `socket_dir`      | `""` (`$XDG_RUNTIME_DIR`)         | Directory used when searching for arRPC sockets  |
+| `socket_path`     | `""` (automatic)                  | Exact arRPC socket path; useful with multiple instances |
+| `blocklist`       | Wine service processes            | Executables to never report as games             |
 | `overrides`       | `{}`                             | Manual `"exe" -> {"id","name"}` mappings         |
 
 ### Overrides
@@ -176,6 +217,8 @@ the database. Case and drive-letter/backslash paths are handled automatically.
 - Windows games running via any Wine/Proton runtime only — native Linux binaries are
   not scanned.
 - Only games present in Discord's detectable database (or with an override) show up.
+- Only one activity is published at a time; shared executable names may require an
+  override to identify the correct game.
 
 ## License
 
