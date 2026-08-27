@@ -92,6 +92,23 @@ class HydraRpcTests(unittest.TestCase):
 
         self.assertEqual(client.socket_path, "/run/user/4242/discord-ipc-3")
 
+    def test_socket_candidates_prefer_last_working_path(self):
+        client = NAMESPACE["RPCClient"]("/run/user/4242/discord-ipc")
+        client.last_path = "/run/user/4242/discord-ipc-3"
+
+        candidates = client.candidate_paths()
+
+        self.assertEqual(candidates[0], "/run/user/4242/discord-ipc-3")
+        self.assertEqual(len(candidates), 10)
+        self.assertEqual(len(set(candidates)), 10)
+
+    def test_retry_delay_is_bounded_exponential_backoff(self):
+        retry_delay = NAMESPACE["retry_delay"]
+
+        self.assertEqual([retry_delay(i) for i in range(1, 7)], [1, 2, 4, 8, 16, 32])
+        self.assertEqual(retry_delay(7), 60)
+        self.assertEqual(retry_delay(100), 60)
+
 
 if __name__ == "__main__":
     unittest.main()

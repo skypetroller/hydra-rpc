@@ -27,6 +27,9 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DB_CACHE = os.path.join(CACHE_DIR, "detectable.json")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
+SOCKET_CONNECT_TIMEOUT = 1
+RETRY_INITIAL_SECONDS = 1
+RETRY_MAX_SECONDS = 60
 
 # Discords IPC framing: [type:int32][length:int32][json bytes]
 IPC_HANDSHAKE = 0
@@ -249,13 +252,14 @@ class RPCClient:
         socket_path = str(socket_path or "")
         self.socket_path = os.path.expanduser(os.path.expandvars(socket_path))
         self.path = None
+        self.last_path = None
         self.sock = None
         self.client_id = None
         self.nonce = 0
 
     def _connect(self):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)
+        s.settimeout(SOCKET_CONNECT_TIMEOUT)
         try:
             s.connect(self.path)
             return s
@@ -263,24 +267,36 @@ class RPCClient:
             s.close()
             raise
 
+    def candidate_paths(self):
+        if self.socket_path:
+            return [self.socket_path]
+
+        paths = []
+        if self.last_path:
+            paths.append(self.last_path)
+        paths.extend(
+            f"{self.base}-{i}" for i in range(10) if f"{self.base}-{i}" not in paths
+        )
+        return paths
+
     def connect(self, client_id):
         if self.sock is not None:
             self.close()
-        paths = [self.socket_path] if self.socket_path else [
-            f"{self.base}-{i}" for i in range(10)
-        ]
         last_error = None
-        for path in paths:
+        for path in self.candidate_paths():
             self.path = path
+            if not self.socket_path and not os.path.exists(path):
+                continue
             try:
                 self.sock = self._connect()
+                self.last_path = path
                 break
             except OSError as e:
                 last_error = e
                 self.sock = None
         if self.sock is None:
             self.path = self.socket_path or None
-            raise last_error or OSError("no arRPC socket found")
+            raise last_error or OSError(f"no arRPC socket found under {self.base}")
         self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
         read_frame(self.sock, 2)  # drain READY
         self.client_id = client_id
@@ -317,6 +333,12 @@ def choose_game(exes, active, overrides, index):
 
 def activity_due(last_sent, now, interval):
     return last_sent is None or now - last_sent >= interval
+
+
+def retry_delay(failures):
+    if failures <= 0:
+        return 0
+    return min(RETRY_MAX_SECONDS, RETRY_INITIAL_SECONDS * 2 ** (failures - 1))
 
 
 def detect_exes(blocklist):
@@ -363,6 +385,8 @@ def main():
     active = None
     start_ms = None
     last_activity_sent = None
+    connection_failures = 0
+    next_connection_attempt = 0.0
 
     def clear_presence():
         nonlocal active, start_ms, last_activity_sent
@@ -401,6 +425,8 @@ def main():
                 if active is not None:
                     log("game exited, clearing presence")
                     clear_presence()
+                connection_failures = 0
+                next_connection_attempt = 0.0
                 if client.sock is None and not warned_no_socket:
                     warned_no_socket = True
                 time.sleep(cfg["poll_seconds"])
@@ -410,16 +436,28 @@ def main():
             exe, app_id, name, pid = chosen
 
             if active != exe:
+                now = time.monotonic()
+                if now < next_connection_attempt:
+                    time.sleep(min(cfg["poll_seconds"], next_connection_attempt - now))
+                    continue
                 log(f"detected game: {name} ({exe}) app_id={app_id}")
                 try:
                     client.connect(app_id)
                 except OSError as e:
                     target = client.path or f"{base}-0..9"
-                    log(f"could not connect to arRPC at {target} ({e}); is arRPC running?")
+                    connection_failures += 1
+                    delay = retry_delay(connection_failures)
+                    next_connection_attempt = time.monotonic() + delay
+                    log(
+                        f"could not connect to arRPC at {target} ({e}); "
+                        f"retrying in {delay}s"
+                    )
                     if active is not None:
                         clear_presence()
-                    time.sleep(cfg["poll_seconds"])
+                    time.sleep(delay)
                     continue
+                connection_failures = 0
+                next_connection_attempt = 0.0
                 active = exe
                 start_ms = int(time.time() * 1000)
                 last_activity_sent = None
@@ -440,6 +478,12 @@ def main():
                     active = None
                     last_activity_sent = None
                     client.close()
+                    connection_failures += 1
+                    delay = retry_delay(connection_failures)
+                    next_connection_attempt = time.monotonic() + delay
+                    log(f"retrying arRPC in {delay}s")
+                    time.sleep(delay)
+                    continue
 
             time.sleep(cfg["poll_seconds"])
 

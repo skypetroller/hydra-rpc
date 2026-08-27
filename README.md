@@ -72,6 +72,10 @@ Hydra -> umu/wine -> Game.exe (running)
 3. Sends `SET_ACTIVITY` to arRPC's IPC socket when a game starts or changes, refreshes
    it periodically to detect lost connections, and clears it when the game exits.
 
+The last working arRPC socket is tried first during the current run. If arRPC is
+unavailable, reconnect attempts back off from 1 second up to 60 seconds instead of
+retrying continuously at the normal scan interval.
+
 ## Requirements
 
 - **Linux** (uses `/proc`).
@@ -157,6 +161,10 @@ If multiple arRPC instances are running, set `socket_path` to the exact socket i
   "socket_path": "${XDG_RUNTIME_DIR}/discord-ipc-0"
 }
 ```
+
+Automatic discovery checks up to ten local `discord-ipc-*` sockets with a one-second
+per-socket connection timeout. Setting `socket_path` avoids discovery entirely and is
+recommended when you always use the same arRPC instance.
 
 If a game is reported as unrecognized, add an override as described below. To force
 a fresh detectable-applications database, remove the cache and restart:
