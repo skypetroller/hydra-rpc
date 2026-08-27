@@ -19,6 +19,24 @@ in Discord's detectable database (or in your `overrides`), it will show up. Dete
 requires the game process to be visible in `/proc`; sandboxed or containerized runners
 that hide the game process may not be detectable.
 
+## Support at a glance
+
+**Supported**
+
+- Windows games launched on Linux through Hydra, standard Proton, Proton GE, UMU-Proton,
+  plain Wine, Lutris, Bottles, Heroic, or similar launchers.
+- Vesktop/Vencord, ArmCord, or browser Discord setups that consume arRPC.
+- Games listed in Discord's detectable-applications database, plus manually configured
+  executable overrides.
+
+**Not supported**
+
+- Native Linux game binaries.
+- The official native Discord desktop client, because it does not consume arRPC.
+- Games whose process is hidden by a sandbox or PID namespace, unless the runner exposes
+  the `.exe` in `/proc`.
+- More than one visible activity at the same time; one mapped game is selected.
+
 ## The problem
 
 - Hydra Launcher has no Discord Rich Presence support.
