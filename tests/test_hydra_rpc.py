@@ -63,6 +63,7 @@ class HydraRpcTests(unittest.TestCase):
                 "db_url": 123,
                 "socket_dir": 123,
                 "socket_path": [],
+                "max_socket_attempts": 0,
                 "blocklist": "not-a-list",
                 "overrides": {"broken.exe": {"id": ""}},
             }))
@@ -80,6 +81,7 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(config["db_url"], NAMESPACE["DB_URL"])
         self.assertEqual(config["socket_dir"], "")
         self.assertEqual(config["socket_path"], "")
+        self.assertEqual(config["max_socket_attempts"], 3)
         self.assertEqual(config["blocklist"], NAMESPACE["DEFAULT_BLOCKLIST"])
         self.assertEqual(config["overrides"], {})
 
@@ -93,14 +95,14 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(client.socket_path, "/run/user/4242/discord-ipc-3")
 
     def test_socket_candidates_prefer_last_working_path(self):
-        client = NAMESPACE["RPCClient"]("/run/user/4242/discord-ipc")
+        client = NAMESPACE["RPCClient"]("/run/user/4242/discord-ipc", max_socket_attempts=4)
         client.last_path = "/run/user/4242/discord-ipc-3"
 
         candidates = client.candidate_paths()
 
         self.assertEqual(candidates[0], "/run/user/4242/discord-ipc-3")
-        self.assertEqual(len(candidates), 10)
-        self.assertEqual(len(set(candidates)), 10)
+        self.assertEqual(len(candidates), 4)
+        self.assertEqual(len(set(candidates)), 4)
 
     def test_retry_delay_is_bounded_exponential_backoff(self):
         retry_delay = NAMESPACE["retry_delay"]

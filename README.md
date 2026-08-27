@@ -162,9 +162,10 @@ If multiple arRPC instances are running, set `socket_path` to the exact socket i
 }
 ```
 
-Automatic discovery checks up to ten local `discord-ipc-*` sockets with a one-second
-per-socket connection timeout. Setting `socket_path` avoids discovery entirely and is
-recommended when you always use the same arRPC instance.
+Automatic discovery checks up to three local `discord-ipc-*` sockets with a one-second
+per-socket connection timeout. The limit can be changed with `max_socket_attempts` from
+1 to 10. Setting `socket_path` avoids discovery entirely and is recommended when you
+always use the same arRPC instance.
 
 If a game is reported as unrecognized, add an override as described below. To force
 a fresh detectable-applications database, remove the cache and restart:
@@ -220,6 +221,7 @@ Tests run automatically for pushes and pull requests through GitHub Actions.
 | `db_ttl_seconds`           | `604800` (7 days)                | How long the cached database is considered fresh |
 | `socket_dir`               | `""` (`$XDG_RUNTIME_DIR`)        | Directory used when searching for arRPC sockets  |
 | `socket_path`              | `""` (automatic)                 | Exact arRPC socket path; useful with multiple instances |
+| `max_socket_attempts`      | `3`                              | Maximum automatic socket paths tried per cycle (1-10) |
 | `blocklist`                | Wine service processes           | Executables to never report as games             |
 | `overrides`                | `{}`                             | Manual `"exe" -> {"id","name"}` mappings       |
 

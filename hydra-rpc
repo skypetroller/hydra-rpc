@@ -30,6 +30,8 @@ DB_URL = "https://discord.com/api/v9/applications/detectable"
 SOCKET_CONNECT_TIMEOUT = 1
 RETRY_INITIAL_SECONDS = 1
 RETRY_MAX_SECONDS = 60
+DEFAULT_SOCKET_ATTEMPTS = 3
+MAX_SOCKET_PATHS = 10
 
 # Discords IPC framing: [type:int32][length:int32][json bytes]
 IPC_HANDSHAKE = 0
@@ -69,6 +71,7 @@ DEFAULT_CONFIG = {
     "db_ttl_seconds": 7 * 24 * 3600,
     "socket_dir": "",
     "socket_path": "",
+    "max_socket_attempts": DEFAULT_SOCKET_ATTEMPTS,
     "blocklist": sorted(DEFAULT_BLOCKLIST),
     "overrides": {},
 }
@@ -101,9 +104,27 @@ def load_config():
             log(f"warning: invalid {key}; using {default}")
             cfg[key] = default
 
+    def normalise_integer(key, minimum, maximum):
+        default = DEFAULT_CONFIG[key]
+        try:
+            raw = cfg.get(key, default)
+            if isinstance(raw, bool):
+                raise ValueError
+            value = float(raw)
+            if not math.isfinite(value) or value != int(value):
+                raise ValueError
+            value = int(value)
+            if value < minimum or value > maximum:
+                raise ValueError
+            cfg[key] = value
+        except (TypeError, ValueError, OverflowError):
+            log(f"warning: invalid {key}; using {default}")
+            cfg[key] = default
+
     normalise_number("poll_seconds", 0.1)
     normalise_number("activity_refresh_seconds", 1)
     normalise_number("db_ttl_seconds", 0)
+    normalise_integer("max_socket_attempts", 1, MAX_SOCKET_PATHS)
 
     if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
         log("warning: invalid db_url; using the Discord detectable-applications endpoint")
@@ -247,10 +268,13 @@ def read_frame(sock, timeout):
 
 
 class RPCClient:
-    def __init__(self, base, socket_path=""):
+    def __init__(self, base, socket_path="", max_socket_attempts=DEFAULT_SOCKET_ATTEMPTS):
         self.base = base
         socket_path = str(socket_path or "")
         self.socket_path = os.path.expanduser(os.path.expandvars(socket_path))
+        self.max_socket_attempts = max(
+            1, min(MAX_SOCKET_PATHS, int(max_socket_attempts))
+        )
         self.path = None
         self.last_path = None
         self.sock = None
@@ -275,7 +299,9 @@ class RPCClient:
         if self.last_path:
             paths.append(self.last_path)
         paths.extend(
-            f"{self.base}-{i}" for i in range(10) if f"{self.base}-{i}" not in paths
+            f"{self.base}-{i}"
+            for i in range(self.max_socket_attempts)
+            if f"{self.base}-{i}" not in paths
         )
         return paths
 
@@ -285,8 +311,6 @@ class RPCClient:
         last_error = None
         for path in self.candidate_paths():
             self.path = path
-            if not self.socket_path and not os.path.exists(path):
-                continue
             try:
                 self.sock = self._connect()
                 self.last_path = path
@@ -380,7 +404,11 @@ def main():
     log(f"loaded {len(index)} executable mappings")
 
     base = runtime_dir(cfg) + "/discord-ipc"
-    client = RPCClient(base, cfg.get("socket_path", ""))
+    client = RPCClient(
+        base,
+        cfg.get("socket_path", ""),
+        cfg["max_socket_attempts"],
+    )
 
     active = None
     start_ms = None
@@ -444,7 +472,7 @@ def main():
                 try:
                     client.connect(app_id)
                 except OSError as e:
-                    target = client.path or f"{base}-0..9"
+                    target = client.path or f"{base}-0..{cfg['max_socket_attempts'] - 1}"
                     connection_failures += 1
                     delay = retry_delay(connection_failures)
                     next_connection_attempt = time.monotonic() + delay
