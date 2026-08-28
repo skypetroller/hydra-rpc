@@ -42,6 +42,50 @@ The tool intentionally reports games generically; it does not add launcher-speci
 labels. Leave `hydra_only` disabled for generic launcher-agnostic detection, or enable it
 to report only processes carrying Hydra markers.
 
+## Choose a mode
+
+There are two ways to use the watcher:
+
+- **Generic mode**: report supported Windows games from Hydra, Heroic, Lutris, Steam,
+  Bottles, or any other Wine/Proton launcher. This is the default.
+- **Hydra-only mode**: report only games started through Hydra. Use this when another
+  launcher has its own Discord Rich Presence and you want to avoid duplicate activities.
+
+### Enable generic mode
+
+Generic mode is enabled when `hydra_only` is set to `false` or is missing. To turn it on
+explicitly:
+
+1. Open `~/.config/hydra-rpc/config.json` in a text editor. You can open it from a
+   terminal with `xdg-open ~/.config/hydra-rpc/config.json`.
+2. Add or change this setting:
+
+   ```json
+   "hydra_only": false
+   ```
+
+3. Save the file and restart the watcher:
+
+   ```sh
+   systemctl --user restart hydra-rpc.service
+   ```
+
+   If you use the login autostart entry instead of systemd, log out and back in, or
+   stop the running copy and start `~/.local/bin/hydra-rpc` again.
+
+The `hydra_markers` setting is ignored in generic mode.
+
+### Enable Hydra-only mode
+
+Set the same option to `true`:
+
+```json
+"hydra_only": true
+```
+
+The default Hydra markers are `hydralauncher` and `/opt/hydra/`. If Hydra is installed
+somewhere else, add its path to `hydra_markers` as described in the conflict guide below.
+
 ## Support at a glance
 
 **Supported**
@@ -239,7 +283,7 @@ If you enable file logging, set `log_file` to a path such as
 ### Avoiding duplicate RPC
 
 Some launchers, including Heroic and Lutris, can publish their own Rich Presence. If
-you want those activities to take priority, enable Hydra-only mode:
+you want those activities to take priority, enable Hydra-only mode using the steps above:
 
 ```json
 {
