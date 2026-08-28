@@ -36,9 +36,11 @@ that hide the game process may not be detectable.
 - Optional file logging with configurable log levels.
 - Automatic arRPC socket discovery with an exact `socket_path` override, cached path
   preference, and exponential connection retry backoff.
+- Optional `hydra_only` origin guard to avoid competing with another launcher's RPC.
 
 The tool intentionally reports games generically; it does not add launcher-specific
-labels or filter games by which runner started them.
+labels. Leave `hydra_only` disabled for generic launcher-agnostic detection, or enable it
+to report only processes carrying Hydra markers.
 
 ## Support at a glance
 
@@ -234,6 +236,32 @@ If you enable file logging, set `log_file` to a path such as
 `~/.cache/hydra-rpc/hydra-rpc.log`. `log_level` accepts `debug`, `info`, `warning`, or
 `error`.
 
+### Avoiding duplicate RPC
+
+Some launchers, including Heroic and Lutris, can publish their own Rich Presence. If
+you want those activities to take priority, enable Hydra-only mode:
+
+```json
+{
+  "hydra_only": true
+}
+```
+
+This only reports a game when its visible process command line or environment contains
+one of the configured Hydra markers. The defaults are `hydralauncher` and `/opt/hydra/`.
+It does not add a launcher name to Discord. If Hydra is installed somewhere nonstandard,
+add a distinctive marker:
+
+```json
+{
+  "hydra_only": true,
+  "hydra_markers": ["/path/to/hydra"]
+}
+```
+
+Avoid using a generic marker such as `gameid=umu-` unless it is unique to your Hydra
+installation, because other launchers can also use UMU.
+
 If a game is reported as unrecognized, add an override as described below. To force
 a fresh detectable-applications database, remove the cache and restart:
 
@@ -290,6 +318,8 @@ Tests run automatically for pushes and pull requests through GitHub Actions.
 | `socket_path`              | `""` (automatic)                 | Exact arRPC socket path; useful with multiple instances |
 | `max_socket_attempts`      | `3`                              | Maximum total automatic paths per cycle (1-10) |
 | `max_activities`           | `0` (all)                        | Maximum mapped games reported at once (0 or 1-10) |
+| `hydra_only`               | `false`                          | Report only processes carrying Hydra markers     |
+| `hydra_markers`            | `hydralauncher` / `/opt/hydra/`  | Case-insensitive markers used by Hydra-only mode |
 | `blocklist`                | Wine service processes           | Executables to never report as games             |
 | `blocklist_ids`            | `[]`                             | Discord application IDs never to report          |
 | `blocklist_names`          | `[]`                             | Game names never to report (case-insensitive)    |
@@ -368,6 +398,8 @@ the database. Case and drive-letter/backslash paths are handled automatically.
 - Shared executable names may require an override to identify the correct game.
 - Detection depends on the `.exe` appearing in a visible process command line; unusual
   wrappers or isolated PID namespaces may require a launcher-specific adjustment.
+- Hydra-only mode depends on a visible Hydra marker; custom Hydra installations may need
+  a `hydra_markers` override.
 
 ## License
 

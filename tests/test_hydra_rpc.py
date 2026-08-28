@@ -166,6 +166,8 @@ class HydraRpcTests(unittest.TestCase):
                 "socket_dir": 123,
                 "socket_path": [],
                 "max_socket_attempts": 0,
+                "hydra_only": "yes",
+                "hydra_markers": "not-a-list",
                 "blocklist": "not-a-list",
                 "overrides": {"broken.exe": {"id": ""}},
             }))
@@ -184,8 +186,35 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(config["socket_dir"], "")
         self.assertEqual(config["socket_path"], "")
         self.assertEqual(config["max_socket_attempts"], 3)
+        self.assertFalse(config["hydra_only"])
+        self.assertEqual(config["hydra_markers"], NAMESPACE["DEFAULT_HYDRA_MARKERS"])
         self.assertEqual(config["blocklist"], NAMESPACE["DEFAULT_BLOCKLIST"])
         self.assertEqual(config["overrides"], {})
+
+    def test_hydra_only_requires_a_hydra_process_marker(self):
+        self.assertNotIn("gameid=umu-", NAMESPACE["DEFAULT_HYDRA_MARKERS"])
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["hydra_only"] = True
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        resolve_game = NAMESPACE["resolve_game"]
+        index = {"example.exe": ("123", "Example")}
+
+        self.assertIsNone(resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe", "sources": set()},
+            {},
+            index,
+            cfg,
+        ))
+        self.assertIsNotNone(resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe", "sources": {"hydra"}},
+            {},
+            index,
+            cfg,
+        ))
 
     def test_socket_path_expands_environment_variables(self):
         with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/4242"}):

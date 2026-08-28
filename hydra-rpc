@@ -41,6 +41,7 @@ DEFAULT_SOCKET_ATTEMPTS = 3
 MAX_SOCKET_PATHS = 10
 DEFAULT_MAX_ACTIVITIES = 0
 MAX_ACTIVITIES = 10
+DEFAULT_HYDRA_MARKERS = {"hydralauncher", "/opt/hydra/"}
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
 CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
 LOG_FILE_HANDLE = None
@@ -85,6 +86,8 @@ DEFAULT_CONFIG = {
     "socket_path": "",
     "max_socket_attempts": DEFAULT_SOCKET_ATTEMPTS,
     "max_activities": DEFAULT_MAX_ACTIVITIES,
+    "hydra_only": False,
+    "hydra_markers": sorted(DEFAULT_HYDRA_MARKERS),
     "blocklist_ids": [],
     "blocklist_names": [],
     "activity_template": "{game_name}",
@@ -182,6 +185,10 @@ def load_config():
     normalise_integer("max_socket_attempts", 1, MAX_SOCKET_PATHS)
     normalise_integer("max_activities", 0, MAX_ACTIVITIES)
 
+    if not isinstance(cfg.get("hydra_only"), bool):
+        log("invalid hydra_only; using false", "warning")
+        cfg["hydra_only"] = False
+
     if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
         log("invalid db_url; using the Discord detectable-applications endpoint", "warning")
         cfg["db_url"] = DB_URL
@@ -216,6 +223,9 @@ def load_config():
 
     normalise_string_set("blocklist_ids")
     normalise_string_set("blocklist_names", casefold=True)
+    normalise_string_set("hydra_markers", casefold=True)
+    if not cfg["hydra_markers"]:
+        cfg["hydra_markers"] = set(DEFAULT_HYDRA_MARKERS)
 
     raw_blocklist = cfg.get("blocklist", [])
     if isinstance(raw_blocklist, (list, tuple, set)):
@@ -559,8 +569,12 @@ def resolve_game(exe, info, overrides, index, cfg):
 
     if isinstance(info, dict):
         pid = info["pid"]
+        if cfg["hydra_only"] and "hydra" not in info.get("sources", set()):
+            return None
     else:
         pid = info
+        if cfg["hydra_only"]:
+            return None
     values = {
         "game_name": game_name,
         "exe": exe,
@@ -696,8 +710,21 @@ def session_start(sessions, game):
     return now_ms
 
 
-def detect_exes(blocklist):
+def process_context(pid, parts):
+    decoded = [item.decode("utf-8", "ignore").strip() for item in parts if item]
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as environment_file:
+            environment = environment_file.read().replace(b"\0", b" ").decode(
+                "utf-8", "ignore"
+            )
+    except OSError:
+        environment = ""
+    return (" ".join(decoded) + " " + environment).casefold()
+
+
+def detect_exes(blocklist, hydra_markers=None):
     found = {}
+    hydra_markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
     try:
         pids = os.listdir("/proc")
     except OSError:
@@ -713,15 +740,25 @@ def detect_exes(blocklist):
         if not raw:
             continue
         parts = raw.split(b"\0")
+        context = None
+        is_hydra = False
         for part in parts:
             part = part.rstrip()
             if len(part) < 4 or part[-4:].lower() != b".exe":
                 continue
+            if context is None:
+                context = process_context(pid, parts)
+                is_hydra = any(marker in context for marker in hydra_markers)
             arg = part.decode("utf-8", "ignore")
             base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
             if not base or base in blocklist:
                 continue
-            found.setdefault(base, {"pid": int(pid), "path": arg})
+            info = found.setdefault(
+                base,
+                {"pid": int(pid), "path": arg, "sources": set()},
+            )
+            if is_hydra:
+                info["sources"].add("hydra")
     return found
 
 
@@ -764,7 +801,7 @@ def main(argv=None):
 
     while True:
         try:
-            exes = detect_exes(cfg["blocklist"])
+            exes = detect_exes(cfg["blocklist"], cfg["hydra_markers"])
             for exe in sorted(exes):
                 if not (cfg["overrides"].get(exe) or index.get(exe)) and exe not in seen_unknown:
                     seen_unknown.add(exe)
