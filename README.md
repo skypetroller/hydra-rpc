@@ -15,10 +15,11 @@ Proton, Wine, or another compatible launcher.
 - Includes `--dry-run` and `--validate-config` troubleshooting commands.
 - Includes explicit `--check-update` and `--update` commands.
 - Supports optional file logging and automatic arRPC socket recovery.
-- Includes an optional Hydra-only mode for avoiding conflicts with other launchers' RPC.
+- Includes an optional Hydra-marker mode that can reduce conflicts with other launchers' RPC.
 
 The tool intentionally reports games generically. It does not add launcher names to your
-Discord activity or filter by launcher unless Hydra-only mode is enabled.
+Discord activity. Hydra-marker mode is a best-effort process filter, not a direct
+integration with Hydra or other launchers.
 
 ## How It Works
 
@@ -143,11 +144,12 @@ To enable it explicitly:
 
 The `hydra_markers` setting has no effect in generic mode.
 
-### Hydra-only mode
+### Hydra-marker mode
 
-Hydra-only mode reports only games whose visible process command line or environment
-contains a Hydra marker. Enable it when another launcher has its own Rich Presence and
-you want that launcher to handle its games:
+This mode does not inspect which launcher truly started a game, and it does not disable or
+monitor another launcher's RPC. It reports a game only when its visible process command
+line or environment contains a Hydra marker. Enable it when another launcher has its own
+Rich Presence and you want to reduce duplicate reporting:
 
 ```json
 "hydra_only": true
@@ -259,8 +261,8 @@ added, so add new settings manually when needed.
 | `socket_dir`               | `$XDG_RUNTIME_DIR`              | Directory used for automatic socket discovery     |
 | `socket_path`              | Automatic                       | Exact arRPC socket path                           |
 | `max_socket_attempts`      | `3`                             | Maximum automatic socket paths tried (1-10)       |
-| `hydra_only`               | `false`                         | Only report processes carrying Hydra markers     |
-| `hydra_markers`            | Hydra path markers              | Markers used by Hydra-only mode                  |
+| `hydra_only`               | `false`                         | Enable best-effort Hydra-marker filtering        |
+| `hydra_markers`            | Hydra path markers              | Markers used by Hydra-marker mode                |
 | `blocklist`                | Wine service processes          | Executable names never reported                   |
 | `blocklist_ids`            | `[]`                            | Discord application IDs never reported            |
 | `blocklist_names`          | `[]`                            | Case-insensitive game names never reported        |
@@ -323,7 +325,9 @@ For a game missing from Discord's database, add a manual mapping:
 - The game process must expose its `.exe` in a visible command line; unusual wrappers,
   sandboxes, or isolated PID namespaces may not work.
 - Discord or the client may choose how many simultaneous activities to display.
-- The tool does not add launcher-specific labels or provide launcher-specific filtering.
+- The tool does not add launcher-specific labels or provide true launcher-origin detection.
+- Hydra-marker mode can miss games or match another launcher if its process information
+  contains the same configured marker.
 
 ## Development
 
