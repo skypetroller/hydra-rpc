@@ -110,10 +110,27 @@ class HydraRpcTests(unittest.TestCase):
 
     def test_session_start_reuses_matching_pid(self):
         start_ms = 123456789
-        sessions = {"example.exe": {"start_ms": start_ms, "pid": 42}}
+        sessions = {"example.exe": {"start_ms": start_ms, "pid": 42, "start_tick": 99}}
         game = {"exe": "example.exe", "pid": 42}
 
-        self.assertEqual(NAMESPACE["session_start"](sessions, game), start_ms)
+        with patch.dict(NAMESPACE, {"get_process_start_tick": lambda _pid: 99}):
+            self.assertEqual(NAMESPACE["session_start"](sessions, game), start_ms)
+
+    def test_session_start_rejects_reused_pid(self):
+        old_start_ms = 123456789
+        sessions = {"example.exe": {"start_ms": old_start_ms, "pid": 42, "start_tick": 99}}
+        game = {"exe": "example.exe", "pid": 42}
+
+        with patch.dict(NAMESPACE, {"get_process_start_tick": lambda _pid: 100}):
+            new_start_ms = NAMESPACE["session_start"](sessions, game)
+
+        self.assertGreater(new_start_ms, old_start_ms)
+
+    def test_process_start_tick_is_available_for_current_process(self):
+        tick = NAMESPACE["get_process_start_tick"](os.getpid())
+
+        self.assertIsInstance(tick, int)
+        self.assertGreater(tick, 0)
 
     def test_cli_modes_parse(self):
         parse_args = NAMESPACE["parse_args"]

@@ -8,7 +8,8 @@ Proton, Wine, or another compatible launcher.
 - Detects Windows games running through Proton, Proton GE, UMU-Proton, and Wine.
 - Works with Hydra, Heroic, Lutris, Bottles, Steam, and similar launchers.
 - Can publish multiple detected game activities at once.
-- Saves session start times so a watcher restart can preserve elapsed time.
+- Saves session start times and process identity so a watcher restart can preserve elapsed
+  time without confusing a reused PID with the old game.
 - Supports custom activity names and optional Discord fields such as `details`, `state`,
   `assets`, and `buttons`.
 - Supports blocklists by executable, Discord application ID, or game name.
