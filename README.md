@@ -32,6 +32,7 @@ that hide the game process may not be detectable.
   `rich_activity`.
 - Executable, Discord application ID, and case-insensitive game-name blocklists.
 - `--dry-run` detection preview and `--validate-config` setup checks.
+- `--check-update` and `--update` commands for explicit GitHub-based updates.
 - Optional file logging with configurable log levels.
 - Automatic arRPC socket discovery with an exact `socket_path` override, cached path
   preference, and exponential connection retry backoff.
@@ -150,6 +151,31 @@ mkdir -p ~/.config/systemd/user
 cp hydra-rpc.service ~/.config/systemd/user/
 systemctl --user enable --now hydra-rpc.service
 ```
+
+## Update
+
+Check for a newer script without changing the installed file:
+
+```sh
+hydra-rpc --check-update
+```
+
+Install the latest script from this repository. The downloaded file is syntax-checked,
+written atomically, and keeps the existing executable permissions:
+
+```sh
+hydra-rpc --update
+```
+
+If you installed to `/usr/local/bin`, use `sudo`:
+
+```sh
+sudo /usr/local/bin/hydra-rpc --update
+```
+
+Restart the background watcher after updating. Updates are always explicit; the watcher
+does not modify itself silently at startup. The updater uses HTTPS and validates Python
+syntax, but it does not verify a signed release.
 
 ## Troubleshooting
 

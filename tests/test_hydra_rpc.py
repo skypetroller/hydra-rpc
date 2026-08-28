@@ -119,6 +119,25 @@ class HydraRpcTests(unittest.TestCase):
         parse_args = NAMESPACE["parse_args"]
         self.assertTrue(parse_args(["--dry-run"]).dry_run)
         self.assertTrue(parse_args(["--validate-config"]).validate_config)
+        self.assertTrue(parse_args(["--check-update"]).check_update)
+        self.assertTrue(parse_args(["--update"]).update)
+
+    def test_update_source_validation_and_atomic_install(self):
+        validate_update_source = NAMESPACE["validate_update_source"]
+        install_update = NAMESPACE["install_update"]
+        source = SCRIPT.read_bytes()
+
+        self.assertEqual(validate_update_source(source), source)
+        with self.assertRaises(ValueError):
+            validate_update_source(b"not a Python script")
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "hydra-rpc"
+            target.write_bytes(b"old")
+            target.chmod(0o750)
+            install_update(str(target), source)
+            self.assertEqual(target.read_bytes(), source)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o750)
 
     def test_file_logging_writes_a_line(self):
         with tempfile.TemporaryDirectory() as directory:

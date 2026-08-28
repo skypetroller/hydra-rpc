@@ -8,6 +8,7 @@ Vesktop / any client connected to arRPC.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -15,7 +16,9 @@ import signal
 import socket
 import struct
 import sys
+import tempfile
 import time
+import urllib.error
 import urllib.request
 
 CONFIG_DIR = os.path.join(
@@ -29,6 +32,8 @@ DB_CACHE = os.path.join(CACHE_DIR, "detectable.json")
 SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
+UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
+UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 RETRY_INITIAL_SECONDS = 1
 RETRY_MAX_SECONDS = 60
@@ -115,7 +120,7 @@ def configure_logging(cfg):
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        LOG_FILE_HANDLE = open(path, "a", buffering=1)
+        LOG_FILE_HANDLE = open(path, "a", buffering=1, encoding="utf-8")
     except OSError as e:
         LOG_FILE_HANDLE = None
         log(f"could not open log_file '{path}': {e}", "warning")
@@ -324,6 +329,78 @@ def save_sessions(sessions):
         os.replace(tmp, SESSION_CACHE)
     except OSError as e:
         log(f"could not save session cache ({e})", "warning")
+
+
+def installed_script_path():
+    return os.path.realpath(globals().get("__file__") or sys.argv[0])
+
+
+def validate_update_source(source):
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError("downloaded update is not valid UTF-8") from e
+    if not text.startswith("#!/usr/bin/env python3"):
+        raise ValueError("downloaded update is not a hydra-rpc script")
+    try:
+        compile(text, UPDATE_URL, "exec")
+    except SyntaxError as e:
+        raise ValueError(f"downloaded update has invalid Python syntax: {e}") from e
+    return source
+
+
+def fetch_update_source():
+    req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
+    with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
+        source = response.read()
+    return validate_update_source(source)
+
+
+def install_update(path, source):
+    path = os.path.realpath(path)
+    parent = os.path.dirname(path) or "."
+    mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o755
+    fd, temporary = tempfile.mkstemp(prefix=".hydra-rpc-update-", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(source)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def update_script(install=False):
+    target = installed_script_path()
+    try:
+        with open(target, "rb") as current_file:
+            current = current_file.read()
+        latest = fetch_update_source()
+    except (OSError, urllib.error.URLError, ValueError) as e:
+        print(f"update failed: {e}", file=sys.stderr)
+        return 1
+
+    if current == latest:
+        print("hydra-rpc is already up to date")
+        return 0
+    if not install:
+        print(f"update available for {target}")
+        print(f"latest source: {hashlib.sha256(latest).hexdigest()}")
+        return 0
+
+    try:
+        install_update(target, latest)
+    except OSError as e:
+        print(f"update failed while replacing {target}: {e}", file=sys.stderr)
+        return 1
+    print(f"updated {target}; restart hydra-rpc to use the new version")
+    return 0
 
 
 def runtime_dir(cfg):
@@ -558,6 +635,16 @@ def parse_args(argv=None):
         action="store_true",
         help="validate settings, load the game database, and check arRPC",
     )
+    modes.add_argument(
+        "--check-update",
+        action="store_true",
+        help="check GitHub for a newer hydra-rpc script",
+    )
+    modes.add_argument(
+        "--update",
+        action="store_true",
+        help="download and atomically install the latest GitHub script",
+    )
     return parser.parse_args(argv)
 
 
@@ -640,6 +727,10 @@ def detect_exes(blocklist):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.check_update:
+        return update_script()
+    if args.update:
+        return update_script(install=True)
     cfg = load_config()
     configure_logging(cfg)
     ensure_config(cfg)
