@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""hydra-rpc: report Windows games (Wine/Proton/umu) to Discord (via arRPC) as Rich Presence.
+"""hydra-rpc: report Wine/Proton and emulator games to Discord via arRPC.
 
-Scans /proc for Windows executables running under any Wine/Proton runtime, maps them
-to their Discord application id using Discord's detectable-applications database,
-and pushes a "Playing <Game>" activity to arRPC's IPC socket so it shows up in
-Vesktop / any client connected to arRPC.
+Scans /proc for Windows executables and supported native emulators, maps games to
+Discord application ids, and pushes Rich Presence through arRPC so it shows up in
+Vesktop or any other arRPC client.
 """
 
 import argparse
@@ -42,6 +41,41 @@ MAX_SOCKET_PATHS = 10
 DEFAULT_MAX_ACTIVITIES = 0
 MAX_ACTIVITIES = 10
 DEFAULT_HYDRA_MARKERS = {"hydralauncher", "/opt/hydra/"}
+DEFAULT_EMULATOR_APPLICATION_IDS = {
+    "retroarch": "505497615748694018",
+    "pcsx2": "505494914872770583",
+    "duckstation": "",
+    "rpcs3": "",
+}
+DEFAULT_EMULATOR_NAMES = {
+    "retroarch": "RetroArch",
+    "duckstation": "DuckStation",
+    "pcsx2": "PCSX2",
+    "rpcs3": "RPCS3",
+}
+EMULATOR_PROFILES = {
+    "retroarch": {
+        "patterns": ("retroarch", "org.libretro.retroarch"),
+        "extensions": {
+            ".7z", ".bin", ".cdi", ".chd", ".cia", ".cue", ".fds", ".gb", ".gba",
+            ".gbc", ".gdi", ".gen", ".iso", ".m3u", ".md", ".n64", ".nds", ".nes",
+            ".pce", ".pbp", ".rom", ".rvz", ".sfc", ".smc", ".sms", ".srm", ".v64",
+            ".wad", ".wbfs", ".xci", ".z64", ".zip",
+        },
+    },
+    "duckstation": {
+        "patterns": ("duckstation", "org.duckstation.duckstation"),
+        "extensions": {".bin", ".chd", ".cue", ".ecm", ".img", ".iso", ".m3u", ".pbp"},
+    },
+    "pcsx2": {
+        "patterns": ("pcsx2", "net.pcsx2.pcsx2"),
+        "extensions": {".bin", ".chd", ".cso", ".cue", ".gz", ".iso", ".m3u"},
+    },
+    "rpcs3": {
+        "patterns": ("rpcs3", "net.rpcs3.rpcs3"),
+        "extensions": {".bin", ".elf", ".iso", ".pkg", ".self"},
+    },
+}
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
 CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
 LOG_FILE_HANDLE = None
@@ -88,9 +122,13 @@ DEFAULT_CONFIG = {
     "max_activities": DEFAULT_MAX_ACTIVITIES,
     "hydra_only": False,
     "hydra_markers": sorted(DEFAULT_HYDRA_MARKERS),
+    "emulators_enabled": False,
+    "emulator_application_ids": dict(DEFAULT_EMULATOR_APPLICATION_IDS),
+    "emulator_overrides": {},
     "blocklist_ids": [],
     "blocklist_names": [],
     "activity_template": "{game_name}",
+    "emulator_activity_template": "{emulator_name}",
     "rich_activity": {},
     "log_file": "",
     "log_level": "info",
@@ -189,6 +227,23 @@ def load_config():
         log("invalid hydra_only; using false", "warning")
         cfg["hydra_only"] = False
 
+    if not isinstance(cfg.get("emulators_enabled"), bool):
+        log("invalid emulators_enabled; using false", "warning")
+        cfg["emulators_enabled"] = False
+
+    emulator_ids = dict(DEFAULT_EMULATOR_APPLICATION_IDS)
+    raw_emulator_ids = cfg.get("emulator_application_ids", {})
+    if isinstance(raw_emulator_ids, dict):
+        for emulator in emulator_ids:
+            value = raw_emulator_ids.get(emulator, emulator_ids[emulator])
+            if isinstance(value, (str, int)):
+                emulator_ids[emulator] = str(value).strip()
+            else:
+                log(f"invalid application ID for {emulator}; using the default", "warning")
+    else:
+        log("invalid emulator_application_ids; using defaults", "warning")
+    cfg["emulator_application_ids"] = emulator_ids
+
     if not isinstance(cfg.get("db_url"), str) or not cfg["db_url"].strip():
         log("invalid db_url; using the Discord detectable-applications endpoint", "warning")
         cfg["db_url"] = DB_URL
@@ -201,6 +256,10 @@ def load_config():
     if not isinstance(cfg.get("activity_template"), str) or not cfg["activity_template"]:
         log("invalid activity_template; using the game name", "warning")
         cfg["activity_template"] = DEFAULT_CONFIG["activity_template"]
+
+    if not isinstance(cfg.get("emulator_activity_template"), str) or not cfg["emulator_activity_template"]:
+        log("invalid emulator_activity_template; using the emulator name", "warning")
+        cfg["emulator_activity_template"] = DEFAULT_CONFIG["emulator_activity_template"]
 
     if not isinstance(cfg.get("rich_activity"), dict):
         log("invalid rich_activity; ignoring it", "warning")
@@ -250,6 +309,23 @@ def load_config():
             continue
         overrides[exe.lower()] = (str(app_id), str(name))
     cfg["overrides"] = overrides
+
+    emulator_overrides = {}
+    raw_emulator_overrides = cfg.get("emulator_overrides") or {}
+    if not isinstance(raw_emulator_overrides, dict):
+        log("invalid emulator_overrides; ignoring them", "warning")
+        raw_emulator_overrides = {}
+    for key, info in raw_emulator_overrides.items():
+        if not isinstance(key, str) or not key.strip() or not isinstance(info, dict):
+            log("ignoring malformed emulator override", "warning")
+            continue
+        app_id = info.get("id")
+        name = info.get("name")
+        if not app_id or not name:
+            log(f"ignoring incomplete emulator override for '{key}'", "warning")
+            continue
+        emulator_overrides[key.casefold()] = {"id": str(app_id), "name": str(name)}
+    cfg["emulator_overrides"] = emulator_overrides
     return cfg
 
 
@@ -558,6 +634,9 @@ def render_activity_value(value, values):
 
 
 def resolve_game(exe, info, overrides, index, cfg):
+    if isinstance(info, dict) and info.get("kind") == "emulator":
+        return resolve_emulator_game(exe, info, cfg)
+
     app = overrides.get(exe) or index.get(exe)
     if not app:
         return None
@@ -599,6 +678,70 @@ def resolve_game(exe, info, overrides, index, cfg):
     }
 
 
+def emulator_override(exe, info, cfg):
+    emulator = info["emulator"]
+    rom_name = info["rom_name"].casefold()
+    overrides = cfg["emulator_overrides"]
+    return (
+        overrides.get(f"{emulator}:{rom_name}")
+        or overrides.get(exe.casefold())
+    )
+
+
+def emulator_application_id(exe, info, cfg):
+    override = emulator_override(exe, info, cfg)
+    return (override or {}).get("id") or cfg["emulator_application_ids"].get(
+        info["emulator"], ""
+    )
+
+
+def resolve_emulator_game(exe, info, cfg):
+    app_id = emulator_application_id(exe, info, cfg)
+    if not app_id:
+        return None
+
+    game_name_key = info["rom_name"].casefold()
+    if app_id in cfg["blocklist_ids"] or game_name_key in cfg["blocklist_names"]:
+        return None
+
+    if cfg["hydra_only"] and "hydra" not in info.get("sources", set()):
+        return None
+
+    emulator_name = DEFAULT_EMULATOR_NAMES[info["emulator"]]
+    values = {
+        "game_name": info["rom_name"],
+        "rom_name": info["rom_name"],
+        "emulator": info["emulator"],
+        "emulator_name": emulator_name,
+        "exe": exe,
+        "app_id": app_id,
+    }
+    override_name = (emulator_override(exe, info, cfg) or {}).get("name")
+    display_name = override_name or render_text(cfg["emulator_activity_template"], values)
+    activity = {
+        "application_id": app_id,
+        "name": display_name,
+        "details": info["rom_name"],
+    }
+    rich_activity = render_activity_value(cfg["rich_activity"], values)
+    for key, value in rich_activity.items():
+        if key not in RESERVED_ACTIVITY_FIELDS:
+            activity[key] = value
+
+    return {
+        "exe": exe,
+        "app_id": app_id,
+        "game_name": info["rom_name"],
+        "display_name": activity["name"],
+        "pid": info["pid"],
+        "activity": activity,
+        "kind": "emulator",
+        "emulator": info["emulator"],
+        "rom_name": info["rom_name"],
+        "rom_path": info["rom_path"],
+    }
+
+
 def choose_games(exes, active, overrides, index, cfg):
     candidates = [exe for exe in active if exe in exes]
     candidates.extend(exe for exe in sorted(exes) if exe not in candidates)
@@ -636,7 +779,7 @@ def retry_delay(failures):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Report Wine/Proton games to Discord through arRPC."
+        description="Report Wine/Proton and emulator games to Discord through arRPC."
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
@@ -739,6 +882,88 @@ def process_context(pid, parts):
     return (" ".join(decoded) + " " + environment).casefold()
 
 
+def normalise_argument(value):
+    return value.strip().strip('"').strip("'").replace("\\", "/")
+
+
+def extract_emulator_rom(profile, parts):
+    extensions = EMULATOR_PROFILES[profile]["extensions"]
+    for value in reversed(parts[1:]):
+        path = normalise_argument(value)
+        if not path or path.startswith("-"):
+            continue
+        upper = path.upper()
+        if profile == "rpcs3" and (
+            upper.endswith("/EBOOT.BIN")
+            or "/PS3_GAME/" in upper
+            or "/DEV_HDD0/GAME/" in upper
+        ):
+            return path
+        extension = os.path.splitext(path)[1].casefold()
+        if extension in extensions:
+            return path
+    return None
+
+
+def clean_rom_name(profile, rom_path):
+    path = normalise_argument(rom_path).rstrip("/")
+    upper = path.upper()
+    marker = "/PS3_GAME/"
+    if profile == "rpcs3" and marker in upper:
+        path = path[:upper.index(marker)].rstrip("/")
+    name = os.path.basename(path) or DEFAULT_EMULATOR_NAMES[profile]
+    stem, extension = os.path.splitext(name)
+    if extension:
+        name = stem
+    name = name.replace("_", " ").strip()
+    return name[:128] or DEFAULT_EMULATOR_NAMES[profile]
+
+
+def detect_emulators(hydra_markers=None):
+    found = {}
+    hydra_markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return found
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        raw_parts = raw.split(b"\0")
+        parts = [item.decode("utf-8", "ignore").strip() for item in raw_parts if item]
+        text = " ".join(parts).casefold()
+        for profile, settings in EMULATOR_PROFILES.items():
+            if not any(pattern in text for pattern in settings["patterns"]):
+                continue
+            rom_path = extract_emulator_rom(profile, parts)
+            if not rom_path:
+                continue
+            context = process_context(pid, raw_parts)
+            key = f"emulator:{profile}:{rom_path.casefold()}"
+            info = found.setdefault(
+                key,
+                {
+                    "kind": "emulator",
+                    "emulator": profile,
+                    "rom_path": rom_path,
+                    "rom_name": clean_rom_name(profile, rom_path),
+                    "pid": int(pid),
+                    "path": rom_path,
+                    "sources": set(),
+                },
+            )
+            if any(marker in context for marker in hydra_markers):
+                info["sources"].add("hydra")
+    return found
+
+
 def detect_exes(blocklist, hydra_markers=None):
     found = {}
     hydra_markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
@@ -819,10 +1044,24 @@ def main(argv=None):
     while True:
         try:
             exes = detect_exes(cfg["blocklist"], cfg["hydra_markers"])
+            if cfg["emulators_enabled"]:
+                exes.update(detect_emulators(cfg["hydra_markers"]))
+
             for exe in sorted(exes):
-                if not (cfg["overrides"].get(exe) or index.get(exe)) and exe not in seen_unknown:
+                info = exes[exe]
+                if isinstance(info, dict) and info.get("kind") == "emulator":
+                    configured = bool(emulator_application_id(exe, info, cfg))
+                    message = (
+                        f"emulator '{info['emulator']}' detected '{info['rom_name']}' "
+                        f"but has no Discord application ID; configure "
+                        f"emulator_application_ids.{info['emulator']}"
+                    )
+                else:
+                    configured = bool(cfg["overrides"].get(exe) or index.get(exe))
+                    message = f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})"
+                if not configured and exe not in seen_unknown:
                     seen_unknown.add(exe)
-                    log(f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})", "warning")
+                    log(message, "warning")
 
             games = choose_games(exes, states.keys(), cfg["overrides"], index, cfg)
 

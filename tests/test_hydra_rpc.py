@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import struct
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,6 +73,34 @@ class HydraRpcTests(unittest.TestCase):
         games_without_closed = choose_games(exes, ["closed.exe"], {}, index, cfg)
         self.assertEqual([game["exe"] for game in games_without_closed], ["alpha.exe"])
 
+    def test_detect_emulators_ignores_plain_iso_mounts(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"mount\0/roms/game.iso\0",
+                "environ": b"",
+            },
+            "101": {
+                "cmdline": b"/usr/bin/duckstation-qt\0/roms/Game.chd\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["detect_emulators"](set())
+
+        self.assertEqual(set(found), {"emulator:duckstation:/roms/game.chd"})
+        self.assertEqual(found["emulator:duckstation:/roms/game.chd"]["rom_name"], "Game")
+
     def test_templates_and_rich_activity_are_generic(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
         cfg["blocklist_ids"] = set()
@@ -93,6 +123,114 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(game["activity"]["details"], "Playing Example")
         self.assertEqual(game["activity"]["state"], "Executable: example.exe")
         self.assertEqual(game["activity"]["assets"], {"large_image": "cover"})
+
+    def test_emulator_rom_paths_and_names(self):
+        extract = NAMESPACE["extract_emulator_rom"]
+        clean = NAMESPACE["clean_rom_name"]
+
+        retroarch_path = extract(
+            "retroarch",
+            ["retroarch", "-L", "/cores/snes9x_libretro.so", "/roms/Super_Mario_World.sfc"],
+        )
+        pcsx2_path = extract("pcsx2", ["pcsx2-qt", "/roms/Final Fantasy X.iso"])
+        rpcs3_path = extract(
+            "rpcs3",
+            ["rpcs3", "/games/BLUS12345/PS3_GAME/USRDIR/EBOOT.BIN"],
+        )
+
+        self.assertEqual(retroarch_path, "/roms/Super_Mario_World.sfc")
+        self.assertEqual(pcsx2_path, "/roms/Final Fantasy X.iso")
+        self.assertEqual(clean("retroarch", retroarch_path), "Super Mario World")
+        self.assertEqual(clean("pcsx2", pcsx2_path), "Final Fantasy X")
+        self.assertEqual(clean("rpcs3", rpcs3_path), "BLUS12345")
+
+    def test_emulator_activity_uses_emulator_app_and_rom_details(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        info = {
+            "kind": "emulator",
+            "emulator": "retroarch",
+            "rom_name": "Super Mario World",
+            "rom_path": "/roms/Super Mario World.sfc",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        game = NAMESPACE["resolve_game"]("emulator:retroarch:rom", info, {}, {}, cfg)
+
+        self.assertEqual(game["app_id"], "505497615748694018")
+        self.assertEqual(game["display_name"], "RetroArch")
+        self.assertEqual(game["activity"]["details"], "Super Mario World")
+
+    def test_emulator_override_name_takes_precedence(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        cfg["emulator_overrides"] = {
+            "retroarch:super mario world": {"id": "999", "name": "Super Mario World"}
+        }
+        info = {
+            "kind": "emulator",
+            "emulator": "retroarch",
+            "rom_name": "Super Mario World",
+            "rom_path": "/roms/Super Mario World.sfc",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        game = NAMESPACE["resolve_game"]("emulator:retroarch:rom", info, {}, {}, cfg)
+
+        self.assertEqual(game["app_id"], "999")
+        self.assertEqual(game["display_name"], "Super Mario World")
+
+    def test_emulators_without_an_application_id_are_skipped(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        info = {
+            "kind": "emulator",
+            "emulator": "rpcs3",
+            "rom_name": "Game",
+            "rom_path": "/games/Game",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        self.assertIsNone(NAMESPACE["resolve_game"]("emulator:rpcs3:game", info, {}, {}, cfg))
+
+    def test_emulator_respects_hydra_only_and_blocklists(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        cfg["hydra_only"] = True
+        info = {
+            "kind": "emulator",
+            "emulator": "retroarch",
+            "rom_name": "Super Mario World",
+            "rom_path": "/roms/Super Mario World.sfc",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        self.assertIsNone(
+            NAMESPACE["resolve_game"]("emulator:retroarch:rom", info, {}, {}, cfg)
+        )
+
+        info["sources"] = {"hydra"}
+        self.assertIsNotNone(
+            NAMESPACE["resolve_game"]("emulator:retroarch:rom", info, {}, {}, cfg)
+        )
+
+        cfg["hydra_only"] = False
+        cfg["blocklist_names"] = {"super mario world"}
+        self.assertIsNone(
+            NAMESPACE["resolve_game"]("emulator:retroarch:rom", info, {}, {}, cfg)
+        )
 
     def test_game_blocklists_are_applied_after_mapping(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
@@ -185,6 +323,9 @@ class HydraRpcTests(unittest.TestCase):
                 "max_socket_attempts": 0,
                 "hydra_only": "yes",
                 "hydra_markers": "not-a-list",
+                "emulators_enabled": "yes",
+                "emulator_application_ids": "not-a-map",
+                "emulator_activity_template": "",
                 "blocklist": "not-a-list",
                 "overrides": {"broken.exe": {"id": ""}},
             }))
@@ -205,6 +346,12 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(config["max_socket_attempts"], 3)
         self.assertFalse(config["hydra_only"])
         self.assertEqual(config["hydra_markers"], NAMESPACE["DEFAULT_HYDRA_MARKERS"])
+        self.assertFalse(config["emulators_enabled"])
+        self.assertEqual(
+            config["emulator_application_ids"],
+            NAMESPACE["DEFAULT_EMULATOR_APPLICATION_IDS"],
+        )
+        self.assertEqual(config["emulator_activity_template"], "{emulator_name}")
         self.assertEqual(config["blocklist"], NAMESPACE["DEFAULT_BLOCKLIST"])
         self.assertEqual(config["overrides"], {})
 

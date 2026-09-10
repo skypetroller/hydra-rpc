@@ -6,6 +6,8 @@ Proton, Wine, or another compatible launcher.
 ## Features
 
 - Detects Windows games running through Proton, Proton GE, UMU-Proton, and Wine.
+- Detects native emulators RetroArch, DuckStation, PCSX2, and RPCS3 when enabled,
+  showing the emulator as the activity with the ROM title in the details.
 - Works with Hydra, Heroic, Lutris, Bottles, Steam, and similar launchers.
 - Can publish multiple detected game activities at once.
 - Saves session start times and process identity so a watcher restart can preserve elapsed
@@ -39,6 +41,10 @@ Game.exe running through Wine/Proton
 The script checks for running `.exe` arguments every 5 seconds. The Discord game database
 is cached locally and refreshed every 7 days. Activities are refreshed periodically so a
 lost arRPC connection can be detected and restored.
+
+When emulator support is enabled, native emulator processes are detected the same way:
+the ROM or game path is read from the emulator's command line and the ROM filename is
+shown in the activity details.
 
 ## Requirements
 
@@ -169,6 +175,54 @@ add a distinctive path to `hydra_markers`:
 Do not use a generic `gameid=umu-` marker unless it is unique to your installation, since
 other launchers can also use UMU.
 
+## Emulated games
+
+Emulator support is off by default. Enable it with:
+
+```json
+{
+  "emulators_enabled": true
+}
+```
+
+Supported emulators: RetroArch, DuckStation, PCSX2, and RPCS3. The ROM or game path
+is read from the emulator's command line, so an emulator sitting idle in its menu
+(with no game loaded) is not reported. The emulator is shown as the activity and the
+ROM title appears in the activity details, for example `Playing RetroArch` with
+`Super Mario World` underneath.
+
+RetroArch and PCSX2 already have Discord application IDs in the database. DuckStation
+and RPCS3 do not, so they are skipped until you provide one — either create a Discord
+application at <https://discord.com/developers/applications> or reuse an existing ID:
+
+```json
+{
+  "emulators_enabled": true,
+  "emulator_application_ids": {
+    "duckstation": "YOUR_DUCKSTATION_APP_ID",
+    "rpcs3": "YOUR_RPCS3_APP_ID"
+  }
+}
+```
+
+For per-ROM control, add an override keyed by `emulator:rom-name` (lowercase) or by the
+full internal key:
+
+```json
+{
+  "emulator_overrides": {
+    "retroarch:super mario world": {
+      "id": "123456789012345678",
+      "name": "Super Mario World"
+    }
+  }
+}
+```
+
+Emulator games obey `hydra_only` like everything else: with it enabled, only emulators
+launched with visible Hydra markers are reported. They also obey `max_activities`,
+`blocklist_ids`, `blocklist_names`, templates, and `rich_activity`.
+
 ## Updating
 
 Check for an update without changing anything:
@@ -264,6 +318,10 @@ added, so add new settings manually when needed.
 | `max_socket_attempts`      | `3`                             | Maximum automatic socket paths tried (1-10)       |
 | `hydra_only`               | `false`                         | Enable best-effort Hydra-marker filtering        |
 | `hydra_markers`            | Hydra path markers              | Markers used by Hydra-marker mode                |
+| `emulators_enabled`        | `false`                         | Detect RetroArch, DuckStation, PCSX2, RPCS3      |
+| `emulator_application_ids` | RetroArch + PCSX2 preset        | Per-emulator Discord application IDs             |
+| `emulator_activity_template` | `"{emulator_name}"`           | Template for the emulator activity name          |
+| `emulator_overrides`       | `{}`                            | Per-emulator or per-ROM application mappings     |
 | `blocklist`                | Wine service processes          | Executable names never reported                   |
 | `blocklist_ids`            | `[]`                            | Discord application IDs never reported            |
 | `blocklist_names`          | `[]`                            | Case-insensitive game names never reported        |
@@ -321,10 +379,12 @@ For a game missing from Discord's database, add a manual mapping:
 
 - Linux only; the watcher uses `/proc`.
 - Windows games running through Wine/Proton are supported; native Linux binaries are not
-  scanned.
-- A game must be in Discord's detectable database or have an override.
+  scanned, except for the four supported emulators when `emulators_enabled` is true.
+- A game must be in Discord's detectable database or have an override. Emulated games
+  additionally need a configured Discord application ID for their emulator.
 - The game process must expose its `.exe` in a visible command line; unusual wrappers,
-  sandboxes, or isolated PID namespaces may not work.
+  sandboxes, or isolated PID namespaces may not work. Emulators must expose the ROM or
+  game path in their command line; an emulator idling in its menu is not reported.
 - Discord or the client may choose how many simultaneous activities to display.
 - The tool does not add launcher-specific labels or provide true launcher-origin detection.
 - Hydra-marker mode can miss games or match another launcher if its process information
