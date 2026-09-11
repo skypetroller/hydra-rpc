@@ -137,12 +137,20 @@ class HydraRpcTests(unittest.TestCase):
             "rpcs3",
             ["rpcs3", "/games/BLUS12345/PS3_GAME/USRDIR/EBOOT.BIN"],
         )
+        dolphin_path = extract(
+            "dolphin", ["dolphin-emu", "/roms/Super Mario Sunshine.rvz"]
+        )
+        ppsspp_path = extract("ppsspp", ["ppsspp", "/roms/Crisis Core.iso"])
 
         self.assertEqual(retroarch_path, "/roms/Super_Mario_World.sfc")
         self.assertEqual(pcsx2_path, "/roms/Final Fantasy X.iso")
         self.assertEqual(clean("retroarch", retroarch_path), "Super Mario World")
         self.assertEqual(clean("pcsx2", pcsx2_path), "Final Fantasy X")
         self.assertEqual(clean("rpcs3", rpcs3_path), "BLUS12345")
+        self.assertEqual(dolphin_path, "/roms/Super Mario Sunshine.rvz")
+        self.assertEqual(clean("dolphin", dolphin_path), "Super Mario Sunshine")
+        self.assertEqual(ppsspp_path, "/roms/Crisis Core.iso")
+        self.assertEqual(clean("ppsspp", ppsspp_path), "Crisis Core")
 
     def test_emulator_activity_uses_emulator_app_and_rom_details(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
@@ -163,6 +171,42 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(game["app_id"], "505497615748694018")
         self.assertEqual(game["display_name"], "RetroArch")
         self.assertEqual(game["activity"]["details"], "Super Mario World")
+
+    def test_dolphin_uses_its_discord_app_with_rom_details(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        info = {
+            "kind": "emulator",
+            "emulator": "dolphin",
+            "rom_name": "Super Mario Sunshine",
+            "rom_path": "/roms/Super Mario Sunshine.rvz",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        game = NAMESPACE["resolve_game"]("emulator:dolphin:rom", info, {}, {}, cfg)
+
+        self.assertEqual(game["app_id"], "356943187589201930")
+        self.assertEqual(game["display_name"], "Dolphin")
+        self.assertEqual(game["activity"]["details"], "Super Mario Sunshine")
+
+    def test_ppsspp_without_an_application_id_is_skipped(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        info = {
+            "kind": "emulator",
+            "emulator": "ppsspp",
+            "rom_name": "Crisis Core",
+            "rom_path": "/roms/Crisis Core.iso",
+            "pid": 42,
+            "sources": set(),
+        }
+
+        self.assertIsNone(NAMESPACE["resolve_game"]("emulator:ppsspp:rom", info, {}, {}, cfg))
 
     def test_emulator_override_name_takes_precedence(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])

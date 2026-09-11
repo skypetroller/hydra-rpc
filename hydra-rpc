@@ -46,12 +46,16 @@ DEFAULT_EMULATOR_APPLICATION_IDS = {
     "pcsx2": "505494914872770583",
     "duckstation": "",
     "rpcs3": "",
+    "dolphin": "356943187589201930",
+    "ppsspp": "",
 }
 DEFAULT_EMULATOR_NAMES = {
     "retroarch": "RetroArch",
     "duckstation": "DuckStation",
     "pcsx2": "PCSX2",
     "rpcs3": "RPCS3",
+    "dolphin": "Dolphin",
+    "ppsspp": "PPSSPP",
 }
 EMULATOR_PROFILES = {
     "retroarch": {
@@ -74,6 +78,16 @@ EMULATOR_PROFILES = {
     "rpcs3": {
         "patterns": ("rpcs3", "net.rpcs3.rpcs3"),
         "extensions": {".bin", ".elf", ".iso", ".pkg", ".self"},
+    },
+    "dolphin": {
+        "patterns": ("dolphin", "dolphin-emu", "org.dolphinemu.dolphin-emu"),
+        "extensions": {
+            ".ciso", ".dol", ".elf", ".gcm", ".iso", ".rvz", ".wad", ".wbfs", ".wia",
+        },
+    },
+    "ppsspp": {
+        "patterns": ("ppsspp", "ppsspp-qt", "ppsspp-sdl", "org.ppsspp.ppsspp"),
+        "extensions": {".cso", ".elf", ".iso", ".pbp", ".prx"},
     },
 }
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}

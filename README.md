@@ -6,7 +6,8 @@ Proton, Wine, or another compatible launcher.
 ## Features
 
 - Detects Windows games running through Proton, Proton GE, UMU-Proton, and Wine.
-- Detects native emulators RetroArch, DuckStation, PCSX2, and RPCS3 when enabled,
+- Detects native emulators RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, and PPSSPP
+  when enabled,
   showing the emulator as the activity with the ROM title in the details.
 - Works with Hydra, Heroic, Lutris, Bottles, Steam, and similar launchers.
 - Can publish multiple detected game activities at once.
@@ -185,14 +186,15 @@ Emulator support is off by default. Enable it with:
 }
 ```
 
-Supported emulators: RetroArch, DuckStation, PCSX2, and RPCS3. The ROM or game path
+Supported emulators: RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, and PPSSPP. The ROM
+or game path
 is read from the emulator's command line, so an emulator sitting idle in its menu
 (with no game loaded) is not reported. The emulator is shown as the activity and the
 ROM title appears in the activity details, for example `Playing RetroArch` with
 `Super Mario World` underneath.
 
-RetroArch and PCSX2 already have Discord application IDs in the database. DuckStation
-and RPCS3 do not, so they are skipped until you provide one — either create a Discord
+RetroArch, PCSX2, and Dolphin already have Discord application IDs. DuckStation,
+RPCS3, and PPSSPP do not, so they are skipped until you provide one — either create a Discord
 application at <https://discord.com/developers/applications> or reuse an existing ID:
 
 ```json
@@ -318,8 +320,8 @@ added, so add new settings manually when needed.
 | `max_socket_attempts`      | `3`                             | Maximum automatic socket paths tried (1-10)       |
 | `hydra_only`               | `false`                         | Enable best-effort Hydra-marker filtering        |
 | `hydra_markers`            | Hydra path markers              | Markers used by Hydra-marker mode                |
-| `emulators_enabled`        | `false`                         | Detect RetroArch, DuckStation, PCSX2, RPCS3      |
-| `emulator_application_ids` | RetroArch + PCSX2 preset        | Per-emulator Discord application IDs             |
+| `emulators_enabled`        | `false`                         | Detect 6 supported emulators                    |
+| `emulator_application_ids` | RetroArch/PCSX2/Dolphin preset | Per-emulator Discord application IDs             |
 | `emulator_activity_template` | `"{emulator_name}"`           | Template for the emulator activity name          |
 | `emulator_overrides`       | `{}`                            | Per-emulator or per-ROM application mappings     |
 | `blocklist`                | Wine service processes          | Executable names never reported                   |
@@ -379,7 +381,7 @@ For a game missing from Discord's database, add a manual mapping:
 
 - Linux only; the watcher uses `/proc`.
 - Windows games running through Wine/Proton are supported; native Linux binaries are not
-  scanned, except for the four supported emulators when `emulators_enabled` is true.
+  scanned, except for the six supported emulators when `emulators_enabled` is true.
 - A game must be in Discord's detectable database or have an override. Emulated games
   additionally need a configured Discord application ID for their emulator.
 - The game process must expose its `.exe` in a visible command line; unusual wrappers,
