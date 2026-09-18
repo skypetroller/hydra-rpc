@@ -4,7 +4,7 @@ import re
 import struct
 import tempfile
 import unittest
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -194,7 +194,85 @@ class HydraRpcTests(unittest.TestCase):
             cfg,
         )
 
-        self.assertIs(first["activity"], second["activity"])
+        self.assertEqual(first["activity"], second["activity"])
+        second["activity"]["details"] = "MUTATED"
+        second["activity"]["assets"] = {"large_image": "MUTATED"}
+        third = NAMESPACE["resolve_game"](
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+        self.assertEqual(third["activity"]["details"], "Playing Example")
+        self.assertNotIn("assets", third["activity"])
+        self.assertEqual(len(NAMESPACE["_ACTIVITY_CACHE"]), 1)
+
+    def test_activity_cache_evicts_least_recently_used(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        NAMESPACE["_ACTIVITY_CACHE"].clear()
+        with patch.dict(NAMESPACE, {"_ACTIVITY_CACHE_MAX": 2}):
+            for name in ("aaa", "bbb", "ccc"):
+                NAMESPACE["resolve_game"](
+                    f"{name}.exe",
+                    {"pid": 42, "path": f"{name}.exe"},
+                    {},
+                    {f"{name}.exe": ("1", name.upper())},
+                    cfg,
+                )
+        keys = [key[1] for key in NAMESPACE["_ACTIVITY_CACHE"]]
+        self.assertEqual(keys, ["bbb.exe", "ccc.exe"])
+
+    def test_poll_seconds_has_a_one_second_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"poll_seconds": 0.1}))
+
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                config = NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+
+        self.assertEqual(config["poll_seconds"], 5)
+
+    def test_emulator_fast_path_skips_unrelated_processes(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"mount\0/roms/game.iso\0",
+                "environ": b"",
+            },
+            "101": {
+                "cmdline": b"/usr/bin/launch-retroarch.sh\0/roms/Game.sfc\0",
+                "environ": b"",
+            },
+            "102": {
+                "cmdline": b"flatpak\0run\0org.libretro.RetroArch\0/roms/Other.sfc\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101", "102"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True)
+
+        keys = sorted(found)
+        self.assertNotIn("mount", "".join(keys))
+        self.assertIn("emulator:retroarch:/roms/game.sfc", keys)
+        self.assertIn("emulator:retroarch:/roms/other.sfc", keys)
 
     def test_templates_and_rich_activity_are_generic(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
@@ -544,6 +622,258 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual([retry_delay(i) for i in range(1, 7)], [1, 2, 4, 8, 16, 32])
         self.assertEqual(retry_delay(7), 60)
         self.assertEqual(retry_delay(100), 60)
+
+    def test_ipc_frame_size_limit(self):
+        read_frame = NAMESPACE["read_frame"]
+
+        class FakeSocket:
+            def settimeout(self, timeout):
+                pass
+
+            def recv(self, n):
+                raise AssertionError("must not read payload of oversized frame")
+
+        oversized = struct.pack("<II", 1, NAMESPACE["MAX_IPC_FRAME_SIZE"] + 1)
+
+        class HeaderSocket(FakeSocket):
+            def __init__(self):
+                self.sent = False
+
+            def recv(self, n):
+                if not self.sent:
+                    self.sent = True
+                    return oversized[:n]
+                raise AssertionError("must not read payload of oversized frame")
+
+        with self.assertRaises(ValueError):
+            read_frame(HeaderSocket(), 1)
+
+    def test_hydra_marker_split_across_environ_chunks(self):
+        real_open = open
+        marker = b"/opt/hydra/"
+        # Split the marker across an 8-byte chunk boundary: b"/opt/hyd" | b"ra/".
+        environ = b"HOME=/root\x00PATH=/opt/hyd" + b"ra/bin\x00"
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            if match.group(2) == "cmdline":
+                return BytesIO(b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0")
+            return BytesIO(environ)
+
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+            patch.dict(NAMESPACE, {"_ENVIRON_CHUNK_BYTES": 8}),
+        ):
+            self.assertTrue(
+                NAMESPACE["has_hydra_marker"]("100", [], {marker.decode()})
+            )
+
+    def test_emulator_fast_path_classification(self):
+        real_open = open
+        procs = {
+            # Wrapper script whose basename contains an emulator token: intended match.
+            "100": {
+                "cmdline": b"/usr/bin/my-dolphin-wrapper\0/roms/game.iso\0",
+                "environ": b"",
+            },
+            # Unrelated process mentioning retroarch but with no ROM path: skip.
+            "101": {
+                "cmdline": b"notes-app\0retroarch-settings.json\0",
+                "environ": b"",
+            },
+            # Flatpak wrapper: full scan, emulator token in arguments.
+            "102": {
+                "cmdline": b"flatpak\0run\0org.libretro.RetroArch\0/roms/game.sfc\0",
+                "environ": b"",
+            },
+            # Plain mount of an ISO: no emulator binary involved.
+            "103": {
+                "cmdline": b"mount\0/roms/game.iso\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101", "102", "103"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+
+        keys = sorted(found)
+        self.assertIn("emulator:dolphin:/roms/game.iso", keys)
+        self.assertIn("emulator:retroarch:/roms/game.sfc", keys)
+        self.assertEqual(len(keys), 2)
+
+    def test_cache_key_covers_every_rendered_value(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        NAMESPACE["_ACTIVITY_CACHE"].clear()
+        resolve_game = NAMESPACE["resolve_game"]
+        args = (
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+
+        baseline = resolve_game(*args)["activity"]
+        mutations = {
+            "other template": dict(cfg, activity_template="{game_name}!"),
+            "other rich fields": dict(cfg, rich_activity={"details": "x"}),
+            "other app id": None,  # handled via index override below
+            "other game name": None,
+            "other exe": None,
+        }
+        # Each mutated config must recompute its fingerprint, not reuse the
+        # baseline's cached one (in production the config is fixed per run).
+        for mutated_cfg in mutations.values():
+            if isinstance(mutated_cfg, dict):
+                mutated_cfg.pop("_rich_json", None)
+        self.assertEqual(
+            resolve_game(*args)["activity"], baseline,
+            "identical inputs must hit the cache",
+        )
+
+        mutated = resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            mutations["other template"],
+        )
+        self.assertNotEqual(mutated["activity"], baseline)
+
+        mutated = resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            mutations["other rich fields"],
+        )
+        self.assertNotEqual(mutated["activity"], baseline)
+
+        mutated = resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {"example.exe": ("999", "Example")},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+        self.assertNotEqual(mutated["activity"], baseline)
+
+        mutated = resolve_game(
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Renamed")},
+            cfg,
+        )
+        self.assertNotEqual(mutated["activity"], baseline)
+
+        mutated = resolve_game(
+            "other.exe",
+            {"pid": 42, "path": "Other.exe"},
+            {},
+            {"other.exe": ("123", "Example")},
+            dict(cfg, activity_template="{game_name} [{exe}]"),
+        )
+        self.assertNotEqual(mutated["activity"], baseline)
+
+    def test_should_send_activity(self):
+        should_send_activity = NAMESPACE["should_send_activity"]
+        payload = {"application_id": "1", "name": "Game"}
+
+        self.assertTrue(should_send_activity(None, payload, False))
+        self.assertTrue(should_send_activity(payload, payload, True))
+        self.assertTrue(should_send_activity({"name": "Other"}, payload, False))
+        self.assertFalse(should_send_activity(dict(payload), payload, False))
+
+    def test_poll_seconds_minimum_is_one_second(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"poll_seconds": 0.1}))
+
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                config = NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+
+        self.assertEqual(config["poll_seconds"], 5)
+
+    def test_save_prunes_stale_and_caps_entries(self):
+        real_open = open
+        now_ms = 1_700_000_000_000
+        sessions = {
+            "old.exe": {"start_ms": now_ms - 8 * 24 * 3600 * 1000, "pid": 1, "start_tick": 1},
+            "good.exe": {"start_ms": now_ms, "pid": 2, "start_tick": 2},
+            "broken.exe": {"nope": True},
+        }
+        written = {}
+
+        class FakeFile(StringIO):
+            def __init__(self, path):
+                self._path = path
+                super().__init__()
+
+            def close(self):
+                written[self._path] = self.getvalue()
+                super().close()
+
+        def fake_open(path, *args, **kwargs):
+            if str(path).endswith(".tmp") or "sessions.json" in str(path):
+                return FakeFile(str(path))
+            return real_open(path, *args, **kwargs)
+
+        with (
+            patch("builtins.open", side_effect=fake_open),
+            patch("os.makedirs"),
+            patch("os.replace"),
+            patch.object(NAMESPACE["time"], "time", return_value=now_ms / 1000),
+        ):
+            NAMESPACE["save_sessions"](sessions)
+
+        saved = json.loads(next(iter(written.values())))
+        self.assertEqual(set(saved), {"good.exe"})
+
+    def test_pid_disappearance_and_malformed_cmdlines(self):
+        real_open = open
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            pid = match.group(1)
+            if pid == "101":
+                raise OSError("process exited")
+            if match.group(2) == "environ":
+                raise OSError("unreadable")
+            if pid == "102":
+                return BytesIO(b"")
+            if pid == "103":
+                return BytesIO(b"\0\0\0")
+            return BytesIO(b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0")
+
+        with (
+            patch("os.listdir", return_value=["100", "101", "102", "103"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), False, False)
+
+        self.assertEqual(set(found), {"game.exe"})
 
 
 if __name__ == "__main__":

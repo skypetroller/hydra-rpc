@@ -7,6 +7,7 @@ Vesktop or any other arRPC client.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -36,6 +37,9 @@ UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
 ACTIVITY_ACK_TIMEOUT = 0.5
+# Largest IPC payload we will accept; arRPC frames are small JSON blobs, so
+# anything bigger indicates a malformed or misbehaving server.
+MAX_IPC_FRAME_SIZE = 1 * 1024 * 1024
 RETRY_INITIAL_SECONDS = 1
 RETRY_MAX_SECONDS = 60
 DEFAULT_SOCKET_ATTEMPTS = 3
@@ -92,6 +96,12 @@ EMULATOR_PROFILES = {
         "extensions": {".cso", ".elf", ".iso", ".pbp", ".prx"},
     },
 }
+# Fast path: map an executable basename (or Flatpak app id token) to its
+# emulator profile, so non-emulator processes skip full pattern scanning.
+_EMULATOR_BINARY_MAP = {}
+for _profile, _settings in EMULATOR_PROFILES.items():
+    for _pattern in _settings["patterns"]:
+        _EMULATOR_BINARY_MAP.setdefault(_pattern, _profile)
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
 CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
 LOG_FILE_HANDLE = None
@@ -130,6 +140,7 @@ DEFAULT_BLOCKLIST = {
 DEFAULT_CONFIG = {
     "poll_seconds": 5,
     "activity_refresh_seconds": 60,
+    "refresh_unchanged_activities": True,
     "db_url": DB_URL,
     "db_ttl_seconds": 7 * 24 * 3600,
     "socket_dir": "",
@@ -233,7 +244,7 @@ def load_config():
             log(f"invalid {key}; using {default}", "warning")
             cfg[key] = default
 
-    normalise_number("poll_seconds", 0.1)
+    normalise_number("poll_seconds", 1)
     normalise_number("activity_refresh_seconds", 1)
     normalise_number("db_ttl_seconds", 0)
     normalise_integer("max_socket_attempts", 1, MAX_SOCKET_PATHS)
@@ -242,6 +253,10 @@ def load_config():
     if not isinstance(cfg.get("hydra_only"), bool):
         log("invalid hydra_only; using false", "warning")
         cfg["hydra_only"] = False
+
+    if not isinstance(cfg.get("refresh_unchanged_activities"), bool):
+        log("invalid refresh_unchanged_activities; using true", "warning")
+        cfg["refresh_unchanged_activities"] = True
 
     if not isinstance(cfg.get("emulators_enabled"), bool):
         log("invalid emulators_enabled; using false", "warning")
@@ -410,16 +425,43 @@ def load_db(cfg):
     return build_index(cached) if cached else {}
 
 
+STALE_SESSION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+MAX_SESSION_ENTRIES = 256
+
+
+def prune_sessions(sessions, now_ms=None):
+    # Drop malformed or ancient entries and cap the total count so the cache
+    # file stays small even across crashes. Keeps the newest entries.
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    valid = {}
+    for exe, record in sessions.items():
+        try:
+            start_ms = int(record["start_ms"])
+            int(record["pid"])
+            int(record["start_tick"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if 0 < start_ms <= now_ms and now_ms - start_ms <= STALE_SESSION_MAX_AGE_MS:
+            valid[exe] = record
+    if len(valid) > MAX_SESSION_ENTRIES:
+        newest = sorted(valid, key=lambda exe: valid[exe]["start_ms"])[-MAX_SESSION_ENTRIES:]
+        valid = {exe: valid[exe] for exe in newest}
+    return valid
+
+
 def load_sessions():
     if not os.path.exists(SESSION_CACHE):
         return {}
     try:
         with open(SESSION_CACHE, "r") as f:
             sessions = json.load(f)
-        return sessions if isinstance(sessions, dict) else {}
+        if not isinstance(sessions, dict):
+            return {}
     except (OSError, ValueError) as e:
         log(f"could not read session cache ({e})", "warning")
         return {}
+    return prune_sessions(sessions)
 
 
 def save_sessions(sessions):
@@ -427,7 +469,7 @@ def save_sessions(sessions):
         os.makedirs(CACHE_DIR, exist_ok=True)
         tmp = SESSION_CACHE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(sessions, f, indent=2, sort_keys=True)
+            json.dump(prune_sessions(sessions), f, indent=2, sort_keys=True)
         os.replace(tmp, SESSION_CACHE)
     except OSError as e:
         log(f"could not save session cache ({e})", "warning")
@@ -536,6 +578,8 @@ def read_frame(sock, timeout):
     except (socket.timeout, ConnectionError, OSError):
         return None
     msg_type, size = struct.unpack("<II", header)
+    if size > MAX_IPC_FRAME_SIZE:
+        raise ValueError(f"IPC frame too large: {size}")
     try:
         data = read_exact(sock, size)
     except (socket.timeout, ConnectionError, OSError):
@@ -622,24 +666,30 @@ class RPCClient:
         self.client_id = None
 
 
+from collections import OrderedDict
+
 RESERVED_ACTIVITY_FIELDS = {"application_id", "name", "timestamps", "type"}
 
-_ACTIVITY_CACHE = {}
+_ACTIVITY_CACHE = OrderedDict()
 _ACTIVITY_CACHE_MAX = 512
 
 
 def cached_activity(cache_key, make):
     try:
-        return _ACTIVITY_CACHE[cache_key]
+        activity = _ACTIVITY_CACHE.pop(cache_key)
     except KeyError:
         pass
     except TypeError:
         return make()
+    else:
+        # Return an independent copy so callers can never mutate the cached entry.
+        _ACTIVITY_CACHE[cache_key] = activity
+        return copy.deepcopy(activity)
     activity = make()
-    if len(_ACTIVITY_CACHE) >= _ACTIVITY_CACHE_MAX:
-        _ACTIVITY_CACHE.clear()
+    while len(_ACTIVITY_CACHE) >= _ACTIVITY_CACHE_MAX:
+        _ACTIVITY_CACHE.popitem(last=False)
     _ACTIVITY_CACHE[cache_key] = activity
-    return activity
+    return copy.deepcopy(activity)
 
 
 def rich_json(rich_activity):
@@ -647,6 +697,19 @@ def rich_json(rich_activity):
         return json.dumps(rich_activity, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return ""
+
+
+def rich_fingerprint(cfg):
+    # The rich-activity config is fixed for the life of the process, so
+    # serialize it once instead of on every candidate, every poll.
+    fingerprint = cfg.get("_rich_json")
+    if fingerprint is None:
+        fingerprint = rich_json(cfg["rich_activity"])
+        try:
+            cfg["_rich_json"] = fingerprint
+        except TypeError:
+            pass
+    return fingerprint
 
 
 class TemplateValues(dict):
@@ -700,7 +763,7 @@ def resolve_game(exe, info, overrides, index, cfg):
         "app_id": app_id,
     }
     template = cfg["activity_template"]
-    cache_key = ("wine", exe, app_id, game_name, template, rich_json(cfg["rich_activity"]))
+    cache_key = ("wine", exe, app_id, game_name, template, rich_fingerprint(cfg))
 
     def build():
         activity = {
@@ -767,7 +830,7 @@ def resolve_emulator_game(exe, info, cfg):
     template = cfg["emulator_activity_template"]
     cache_key = (
         "emulator", exe, app_id, info["rom_name"], template,
-        rich_json(cfg["rich_activity"]), override_name or "",
+        rich_fingerprint(cfg), override_name or "",
     )
 
     def build():
@@ -832,6 +895,14 @@ def retry_delay(failures):
     if failures <= 0:
         return 0
     return min(RETRY_MAX_SECONDS, RETRY_INITIAL_SECONDS * 2 ** (failures - 1))
+
+
+def should_send_activity(last_payload, payload, refresh_unchanged):
+    # The periodic refresh doubles as a connection-liveness probe, so it stays
+    # on by default; disabling it skips IPC traffic for byte-identical payloads.
+    if refresh_unchanged:
+        return True
+    return last_payload is None or last_payload != payload
 
 
 def parse_args(argv=None):
@@ -931,24 +1002,54 @@ def _decode_parts(raw_parts):
     return [item.decode("utf-8", "ignore").strip() for item in raw_parts if item]
 
 
-def has_hydra_marker(pid, raw_parts, markers, decoded=None):
-    if not markers:
+_ENVIRON_CHUNK_BYTES = 65536
+
+_MARKER_BYTES_CACHE = {}
+_MARKER_BYTES_CACHE_MAX = 64
+
+
+def _marker_bytes(markers):
+    # Marker sets are fixed per run, so encode them once instead of per process.
+    key = frozenset(markers)
+    cached = _MARKER_BYTES_CACHE.get(key)
+    if cached is None:
+        cached = tuple(m.encode("utf-8", "ignore").lower() for m in markers if m)
+        if len(_MARKER_BYTES_CACHE) >= _MARKER_BYTES_CACHE_MAX:
+            _MARKER_BYTES_CACHE.clear()
+        _MARKER_BYTES_CACHE[key] = cached
+    return cached
+
+
+def _contains_any(blob, needles):
+    return any(needle in blob for needle in needles)
+
+
+def has_hydra_marker(pid, raw_parts, markers, stats=None):
+    byte_markers = _marker_bytes(markers)
+    if not byte_markers:
         return False
-    if decoded is None:
-        decoded = _decode_parts(raw_parts)
-    if any(marker in " ".join(decoded).casefold() for marker in markers):
+    if _contains_any(b"\0".join(p for p in raw_parts if p).lower(), byte_markers):
         return True
+    # Stream the environment in chunks instead of loading/decoding it whole.
+    # Keep an overlap so a marker split across a chunk boundary is still found.
+    overlap = max(len(marker) for marker in byte_markers)
     try:
         with open(f"/proc/{pid}/environ", "rb") as environment_file:
-            environment = environment_file.read().replace(b"\0", b" ").decode(
-                "utf-8", "ignore"
-            )
+            if stats is not None:
+                stats["environ_reads"] = stats.get("environ_reads", 0) + 1
+            tail = b""
+            while True:
+                chunk = environment_file.read(_ENVIRON_CHUNK_BYTES)
+                if not chunk:
+                    return False
+                if _contains_any((tail + chunk).lower(), byte_markers):
+                    return True
+                tail = chunk[-(overlap - 1):] if overlap > 1 else b""
     except OSError:
         return False
-    return any(marker in environment.casefold() for marker in markers)
 
 
-def _iter_cmdlines():
+def _iter_cmdlines(stats=None):
     try:
         pids = os.listdir("/proc")
     except OSError:
@@ -956,6 +1057,8 @@ def _iter_cmdlines():
     for pid in pids:
         if not pid.isdigit():
             continue
+        if stats is not None:
+            stats["processes"] = stats.get("processes", 0) + 1
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 raw = f.read()
@@ -963,13 +1066,15 @@ def _iter_cmdlines():
             continue
         if not raw:
             continue
+        if stats is not None:
+            stats["cmdlines"] = stats.get("cmdlines", 0) + 1
         yield int(pid), raw
 
 
-def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_hydra=True):
+def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_hydra=True, stats=None):
     markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
     found = {}
-    for pid, raw in _iter_cmdlines():
+    for pid, raw in _iter_cmdlines(stats):
         parts = raw.split(b"\0")
         decoded = None
         hydra_state = None
@@ -979,7 +1084,7 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
             if len(piece) < 4 or piece[-4:].lower() != b".exe":
                 continue
             if mark_hydra and hydra_state is None:
-                hydra_state = has_hydra_marker(pid, parts, markers, decoded)
+                hydra_state = has_hydra_marker(pid, parts, markers, stats)
             arg = piece.decode("utf-8", "ignore")
             base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
             if not base or base in blocklist:
@@ -993,17 +1098,33 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
 
         if not emulators_enabled:
             continue
+        # Fast path: only decode/scan processes whose executable looks like a
+        # known emulator (or a flatpak/bwrap wrapper, which needs a full scan).
+        first = parts[0].decode("utf-8", "ignore").strip() if parts and parts[0] else ""
+        base0 = first.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        profile = _EMULATOR_BINARY_MAP.get(base0)
+        if profile is None:
+            for token, candidate in _EMULATOR_BINARY_MAP.items():
+                if token in base0:
+                    profile = candidate
+                    break
+        if profile is None and base0 not in ("flatpak", "bwrap"):
+            continue
         if decoded is None:
             decoded = _decode_parts(parts)
         text = " ".join(decoded).casefold()
-        for profile, settings in EMULATOR_PROFILES.items():
+        profiles = (profile,) if profile is not None else tuple(EMULATOR_PROFILES)
+        if stats is not None:
+            stats["emulator_candidates"] = stats.get("emulator_candidates", 0) + 1
+        for profile in profiles:
+            settings = EMULATOR_PROFILES[profile]
             if not any(pattern in text for pattern in settings["patterns"]):
                 continue
             rom_path = extract_emulator_rom(profile, decoded)
             if not rom_path:
                 continue
             if mark_hydra and hydra_state is None:
-                hydra_state = has_hydra_marker(pid, parts, markers, decoded)
+                hydra_state = has_hydra_marker(pid, parts, markers, stats)
             key = f"emulator:{profile}:{rom_path.casefold()}"
             info = found.setdefault(
                 key,
@@ -1019,6 +1140,9 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
             )
             if hydra_state:
                 info["sources"].add("hydra")
+    if stats is not None:
+        stats["wine_hits"] = sum(1 for v in found.values() if v.get("kind") != "emulator")
+        stats["emulator_hits"] = sum(1 for v in found.values() if v.get("kind") == "emulator")
     return found
 
 
@@ -1106,13 +1230,33 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+    # Deadline-based scheduling: scans that overrun (e.g. slow IPC) shift the
+    # next deadline instead of stacking sleeps, so delays can't accumulate.
+    next_scan = 0.0
     while True:
         try:
+            now = time.monotonic()
+            if now < next_scan:
+                time.sleep(next_scan - now)
+            scan_start = time.monotonic()
+            stats = {}
             exes = scan_processes(
                 cfg["blocklist"],
                 cfg["hydra_markers"],
                 cfg["emulators_enabled"],
                 cfg["hydra_only"],
+                stats,
+            )
+            scan_ms = (time.monotonic() - scan_start) * 1000
+            log(
+                f"scan: {stats.get('processes', 0)} procs, "
+                f"{stats.get('cmdlines', 0)} cmdlines, "
+                f"{stats.get('environ_reads', 0)} environs, "
+                f"{stats.get('emulator_candidates', 0)} emu candidates, "
+                f"{stats.get('wine_hits', 0)} wine + "
+                f"{stats.get('emulator_hits', 0)} emu hits "
+                f"in {scan_ms:.1f}ms",
+                "debug",
             )
 
             for exe in sorted(exes):
@@ -1148,7 +1292,7 @@ def main(argv=None):
                     else:
                         log("dry-run: no supported games detected")
                     dry_signature = signature
-                time.sleep(cfg["poll_seconds"])
+                next_scan = scan_start + cfg["poll_seconds"]
                 continue
 
             selected = {game["exe"]: game for game in games}
@@ -1179,6 +1323,7 @@ def main(argv=None):
                             cfg["max_socket_attempts"],
                         ),
                         "last_activity_sent": None,
+                        "last_activity_payload": None,
                         "connection_failures": 0,
                         "next_connection_attempt": 0.0,
                     }
@@ -1196,6 +1341,7 @@ def main(argv=None):
                     if metadata_changed:
                         state["client"].close()
                         state["last_activity_sent"] = None
+                        state["last_activity_payload"] = None
                         state["connection_failures"] = 0
                         state["next_connection_attempt"] = 0.0
 
@@ -1219,6 +1365,7 @@ def main(argv=None):
                     state["connection_failures"] = 0
                     state["next_connection_attempt"] = 0.0
                     state["last_activity_sent"] = None
+                    state["last_activity_payload"] = None
 
                 now = time.monotonic()
                 if activity_due(
@@ -1228,27 +1375,35 @@ def main(argv=None):
                 ):
                     activity = dict(state["activity"])
                     activity["timestamps"] = {"start": state["start_ms"]}
-                    try:
-                        state["client"].send(
-                            "SET_ACTIVITY",
-                            {"activity": activity, "pid": state["pid"]},
-                        )
+                    if not should_send_activity(
+                        state.get("last_activity_payload"),
+                        activity,
+                        cfg["refresh_unchanged_activities"],
+                    ):
                         state["last_activity_sent"] = now
-                    except OSError:
-                        log("arRPC connection lost, will reconnect", "warning")
-                        state["client"].close()
-                        state["connection_failures"] += 1
-                        delay = retry_delay(state["connection_failures"])
-                        state["next_connection_attempt"] = time.monotonic() + delay
+                    else:
+                        try:
+                            state["client"].send(
+                                "SET_ACTIVITY",
+                                {"activity": activity, "pid": state["pid"]},
+                            )
+                            state["last_activity_sent"] = now
+                            state["last_activity_payload"] = activity
+                        except OSError:
+                            log("arRPC connection lost, will reconnect", "warning")
+                            state["client"].close()
+                            state["connection_failures"] += 1
+                            delay = retry_delay(state["connection_failures"])
+                            state["next_connection_attempt"] = time.monotonic() + delay
 
             if sessions_dirty:
                 save_sessions(sessions)
                 sessions_dirty = False
-            time.sleep(cfg["poll_seconds"])
+            next_scan = scan_start + cfg["poll_seconds"]
 
         except Exception as e:
             log(f"unexpected error: {e}", "error")
-            time.sleep(cfg["poll_seconds"])
+            next_scan = time.monotonic() + cfg["poll_seconds"]
 
 
 if __name__ == "__main__":
