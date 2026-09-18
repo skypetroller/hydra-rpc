@@ -101,6 +101,101 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(set(found), {"emulator:duckstation:/roms/game.chd"})
         self.assertEqual(found["emulator:duckstation:/roms/game.chd"]["rom_name"], "Game")
 
+    def test_shared_scan_covers_wine_and_emulators_in_one_pass(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0",
+                "environ": b"GAMEID=umu-1\0",
+            },
+            "101": {
+                "cmdline": b"/usr/bin/duckstation-qt\0/roms/Game.chd\0",
+                "environ": b"",
+            },
+        }
+        cmdline_opens = []
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            if match.group(2) == "cmdline":
+                cmdline_opens.append(match.group(1))
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True)
+
+        self.assertEqual(
+            set(found), {"game.exe", "emulator:duckstation:/roms/game.chd"}
+        )
+        # each process cmdline read exactly once despite both detectors running
+        self.assertEqual(sorted(cmdline_opens), ["100", "101"])
+        self.assertEqual(found["game.exe"]["pid"], 100)
+
+    def test_hydra_marking_skipped_unless_requested(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0",
+                "environ": b"GAMEID=umu-1\0",
+            },
+        }
+        environ_opens = []
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            if match.group(2) == "environ":
+                environ_opens.append(match.group(1))
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        markers = {"gameid=umu-1"}
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            unmarked = NAMESPACE["scan_processes"](set(), markers, False, False)
+
+        self.assertEqual(unmarked["game.exe"]["sources"], set())
+        self.assertEqual(environ_opens, [])
+
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            marked = NAMESPACE["scan_processes"](set(), markers, False, True)
+
+        self.assertEqual(marked["game.exe"]["sources"], {"hydra"})
+
+    def test_rendered_activities_are_cached(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {"details": "Playing {game_name}"}
+        NAMESPACE["_ACTIVITY_CACHE"].clear()
+
+        first = NAMESPACE["resolve_game"](
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+        second = NAMESPACE["resolve_game"](
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+
+        self.assertIs(first["activity"], second["activity"])
+
     def test_templates_and_rich_activity_are_generic(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
         cfg["blocklist_ids"] = set()

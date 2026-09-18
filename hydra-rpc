@@ -34,6 +34,8 @@ DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
 UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
+HANDSHAKE_READ_TIMEOUT = 1
+ACTIVITY_ACK_TIMEOUT = 0.5
 RETRY_INITIAL_SECONDS = 1
 RETRY_MAX_SECONDS = 60
 DEFAULT_SOCKET_ATTEMPTS = 3
@@ -600,7 +602,7 @@ class RPCClient:
             self.path = self.socket_path or None
             raise last_error or OSError(f"no arRPC socket found under {self.base}")
         self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
-        read_frame(self.sock, 2)  # drain READY
+        read_frame(self.sock, HANDSHAKE_READ_TIMEOUT)  # drain READY
         self.client_id = client_id
 
     def send(self, cmd, args):
@@ -608,7 +610,7 @@ class RPCClient:
         self.sock.sendall(
             encode_frame(IPC_FRAME, {"cmd": cmd, "args": args, "nonce": str(self.nonce)})
         )
-        read_frame(self.sock, 1)  # drain ack
+        read_frame(self.sock, ACTIVITY_ACK_TIMEOUT)  # drain ack (content ignored)
 
     def close(self):
         if self.sock is not None:
@@ -621,6 +623,30 @@ class RPCClient:
 
 
 RESERVED_ACTIVITY_FIELDS = {"application_id", "name", "timestamps", "type"}
+
+_ACTIVITY_CACHE = {}
+_ACTIVITY_CACHE_MAX = 512
+
+
+def cached_activity(cache_key, make):
+    try:
+        return _ACTIVITY_CACHE[cache_key]
+    except KeyError:
+        pass
+    except TypeError:
+        return make()
+    activity = make()
+    if len(_ACTIVITY_CACHE) >= _ACTIVITY_CACHE_MAX:
+        _ACTIVITY_CACHE.clear()
+    _ACTIVITY_CACHE[cache_key] = activity
+    return activity
+
+
+def rich_json(rich_activity):
+    try:
+        return json.dumps(rich_activity, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return ""
 
 
 class TemplateValues(dict):
@@ -673,14 +699,21 @@ def resolve_game(exe, info, overrides, index, cfg):
         "exe": exe,
         "app_id": app_id,
     }
-    activity = {
-        "application_id": app_id,
-        "name": render_text(cfg["activity_template"], values),
-    }
-    rich_activity = render_activity_value(cfg["rich_activity"], values)
-    for key, value in rich_activity.items():
-        if key not in RESERVED_ACTIVITY_FIELDS:
-            activity[key] = value
+    template = cfg["activity_template"]
+    cache_key = ("wine", exe, app_id, game_name, template, rich_json(cfg["rich_activity"]))
+
+    def build():
+        activity = {
+            "application_id": app_id,
+            "name": render_text(template, values),
+        }
+        rich_activity = render_activity_value(cfg["rich_activity"], values)
+        for key, value in rich_activity.items():
+            if key not in RESERVED_ACTIVITY_FIELDS:
+                activity[key] = value
+        return activity
+
+    activity = cached_activity(cache_key, build)
 
     return {
         "exe": exe,
@@ -731,16 +764,25 @@ def resolve_emulator_game(exe, info, cfg):
         "app_id": app_id,
     }
     override_name = (emulator_override(exe, info, cfg) or {}).get("name")
-    display_name = override_name or render_text(cfg["emulator_activity_template"], values)
-    activity = {
-        "application_id": app_id,
-        "name": display_name,
-        "details": info["rom_name"],
-    }
-    rich_activity = render_activity_value(cfg["rich_activity"], values)
-    for key, value in rich_activity.items():
-        if key not in RESERVED_ACTIVITY_FIELDS:
-            activity[key] = value
+    template = cfg["emulator_activity_template"]
+    cache_key = (
+        "emulator", exe, app_id, info["rom_name"], template,
+        rich_json(cfg["rich_activity"]), override_name or "",
+    )
+
+    def build():
+        activity = {
+            "application_id": app_id,
+            "name": override_name or render_text(template, values),
+            "details": info["rom_name"],
+        }
+        rich_activity = render_activity_value(cfg["rich_activity"], values)
+        for key, value in rich_activity.items():
+            if key not in RESERVED_ACTIVITY_FIELDS:
+                activity[key] = value
+        return activity
+
+    activity = cached_activity(cache_key, build)
 
     return {
         "exe": exe,
@@ -757,10 +799,11 @@ def resolve_emulator_game(exe, info, cfg):
 
 
 def choose_games(exes, active, overrides, index, cfg):
-    candidates = [exe for exe in active if exe in exes]
-    candidates.extend(exe for exe in sorted(exes) if exe not in candidates)
+    ordered = [exe for exe in active if exe in exes]
+    seen = set(ordered)
+    ordered.extend(exe for exe in sorted(exes) if exe not in seen)
     games = []
-    for exe in candidates:
+    for exe in ordered:
         game = resolve_game(exe, exes[exe], overrides, index, cfg)
         if game:
             games.append(game)
@@ -884,16 +927,99 @@ def session_start(sessions, game):
     return now_ms
 
 
-def process_context(pid, parts):
-    decoded = [item.decode("utf-8", "ignore").strip() for item in parts if item]
+def _decode_parts(raw_parts):
+    return [item.decode("utf-8", "ignore").strip() for item in raw_parts if item]
+
+
+def has_hydra_marker(pid, raw_parts, markers, decoded=None):
+    if not markers:
+        return False
+    if decoded is None:
+        decoded = _decode_parts(raw_parts)
+    if any(marker in " ".join(decoded).casefold() for marker in markers):
+        return True
     try:
         with open(f"/proc/{pid}/environ", "rb") as environment_file:
             environment = environment_file.read().replace(b"\0", b" ").decode(
                 "utf-8", "ignore"
             )
     except OSError:
-        environment = ""
-    return (" ".join(decoded) + " " + environment).casefold()
+        return False
+    return any(marker in environment.casefold() for marker in markers)
+
+
+def _iter_cmdlines():
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        yield int(pid), raw
+
+
+def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_hydra=True):
+    markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
+    found = {}
+    for pid, raw in _iter_cmdlines():
+        parts = raw.split(b"\0")
+        decoded = None
+        hydra_state = None
+
+        for part in parts:
+            piece = part.rstrip()
+            if len(piece) < 4 or piece[-4:].lower() != b".exe":
+                continue
+            if mark_hydra and hydra_state is None:
+                hydra_state = has_hydra_marker(pid, parts, markers, decoded)
+            arg = piece.decode("utf-8", "ignore")
+            base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if not base or base in blocklist:
+                continue
+            info = found.setdefault(
+                base,
+                {"pid": pid, "path": arg, "sources": set()},
+            )
+            if hydra_state:
+                info["sources"].add("hydra")
+
+        if not emulators_enabled:
+            continue
+        if decoded is None:
+            decoded = _decode_parts(parts)
+        text = " ".join(decoded).casefold()
+        for profile, settings in EMULATOR_PROFILES.items():
+            if not any(pattern in text for pattern in settings["patterns"]):
+                continue
+            rom_path = extract_emulator_rom(profile, decoded)
+            if not rom_path:
+                continue
+            if mark_hydra and hydra_state is None:
+                hydra_state = has_hydra_marker(pid, parts, markers, decoded)
+            key = f"emulator:{profile}:{rom_path.casefold()}"
+            info = found.setdefault(
+                key,
+                {
+                    "kind": "emulator",
+                    "emulator": profile,
+                    "rom_path": rom_path,
+                    "rom_name": clean_rom_name(profile, rom_path),
+                    "pid": pid,
+                    "path": rom_path,
+                    "sources": set(),
+                },
+            )
+            if hydra_state:
+                info["sources"].add("hydra")
+    return found
 
 
 def normalise_argument(value):
@@ -934,88 +1060,13 @@ def clean_rom_name(profile, rom_path):
 
 
 def detect_emulators(hydra_markers=None):
-    found = {}
-    hydra_markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return found
-    for pid in pids:
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                raw = f.read()
-        except OSError:
-            continue
-        if not raw:
-            continue
-        raw_parts = raw.split(b"\0")
-        parts = [item.decode("utf-8", "ignore").strip() for item in raw_parts if item]
-        text = " ".join(parts).casefold()
-        for profile, settings in EMULATOR_PROFILES.items():
-            if not any(pattern in text for pattern in settings["patterns"]):
-                continue
-            rom_path = extract_emulator_rom(profile, parts)
-            if not rom_path:
-                continue
-            context = process_context(pid, raw_parts)
-            key = f"emulator:{profile}:{rom_path.casefold()}"
-            info = found.setdefault(
-                key,
-                {
-                    "kind": "emulator",
-                    "emulator": profile,
-                    "rom_path": rom_path,
-                    "rom_name": clean_rom_name(profile, rom_path),
-                    "pid": int(pid),
-                    "path": rom_path,
-                    "sources": set(),
-                },
-            )
-            if any(marker in context for marker in hydra_markers):
-                info["sources"].add("hydra")
-    return found
+    found = scan_processes(set(), hydra_markers, emulators_enabled=True)
+    return {key: info for key, info in found.items() if info.get("kind") == "emulator"}
 
 
 def detect_exes(blocklist, hydra_markers=None):
-    found = {}
-    hydra_markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return found
-    for pid in pids:
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                raw = f.read()
-        except OSError:
-            continue
-        if not raw:
-            continue
-        parts = raw.split(b"\0")
-        context = None
-        is_hydra = False
-        for part in parts:
-            part = part.rstrip()
-            if len(part) < 4 or part[-4:].lower() != b".exe":
-                continue
-            if context is None:
-                context = process_context(pid, parts)
-                is_hydra = any(marker in context for marker in hydra_markers)
-            arg = part.decode("utf-8", "ignore")
-            base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
-            if not base or base in blocklist:
-                continue
-            info = found.setdefault(
-                base,
-                {"pid": int(pid), "path": arg, "sources": set()},
-            )
-            if is_hydra:
-                info["sources"].add("hydra")
-    return found
+    found = scan_processes(blocklist, hydra_markers)
+    return {key: info for key, info in found.items() if info.get("kind") != "emulator"}
 
 
 def main(argv=None):
@@ -1057,9 +1108,12 @@ def main(argv=None):
 
     while True:
         try:
-            exes = detect_exes(cfg["blocklist"], cfg["hydra_markers"])
-            if cfg["emulators_enabled"]:
-                exes.update(detect_emulators(cfg["hydra_markers"]))
+            exes = scan_processes(
+                cfg["blocklist"],
+                cfg["hydra_markers"],
+                cfg["emulators_enabled"],
+                cfg["hydra_only"],
+            )
 
             for exe in sorted(exes):
                 info = exes[exe]
