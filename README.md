@@ -324,6 +324,7 @@ added, so add new settings manually when needed.
 | -------------------------- | ------------------------------- | ------------------------------------------------ |
 | `poll_seconds`             | `5`                             | How often to scan running processes (minimum 1)  |
 | `activity_refresh_seconds` | `60`                            | How often to refresh active activities            |
+| `refresh_unchanged_activities` | `true`                      | Resend identical activities as a liveness probe; when `false`, unchanged payloads are skipped and the connection is verified with a tiny IPC ping instead |
 | `refresh_unchanged_activities` | `true`                      | Resend identical activities as a liveness probe; when `false`, byte-identical refreshes are skipped |
 | `max_activities`           | `0` (all)                       | Use `1`-`10` to limit reported games              |
 | `db_url`                   | Discord endpoint                | Source of the executable database                 |

@@ -37,6 +37,7 @@ UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
 ACTIVITY_ACK_TIMEOUT = 0.5
+PING_PROBE_TIMEOUT = 1
 # Largest IPC payload we will accept; arRPC frames are small JSON blobs, so
 # anything bigger indicates a malformed or misbehaving server.
 MAX_IPC_FRAME_SIZE = 1 * 1024 * 1024
@@ -109,6 +110,9 @@ LOG_FILE_HANDLE = None
 # Discords IPC framing: [type:int32][length:int32][json bytes]
 IPC_HANDSHAKE = 0
 IPC_FRAME = 1
+IPC_CLOSE = 2
+IPC_PING = 3
+IPC_PONG = 4
 
 # Windows processes we should never report as "games".
 DEFAULT_BLOCKLIST = {
@@ -655,6 +659,19 @@ class RPCClient:
             encode_frame(IPC_FRAME, {"cmd": cmd, "args": args, "nonce": str(self.nonce)})
         )
         read_frame(self.sock, ACTIVITY_ACK_TIMEOUT)  # drain ack (content ignored)
+
+    def ping(self):
+        # Cheap liveness probe: a few bytes round-trip instead of a full
+        # activity resend. Returns True only on a matching PONG echo,
+        # False on timeout/closed socket. Lets protocol errors propagate.
+        try:
+            self.nonce += 1
+            payload = {"nonce": str(self.nonce)}
+            self.sock.sendall(encode_frame(IPC_PING, payload))
+            reply = read_frame(self.sock, PING_PROBE_TIMEOUT)
+        except OSError:
+            return False
+        return bool(reply) and reply[0] == IPC_PONG and reply[1] == payload
 
     def close(self):
         if self.sock is not None:
@@ -1380,7 +1397,18 @@ def main(argv=None):
                         activity,
                         cfg["refresh_unchanged_activities"],
                     ):
-                        state["last_activity_sent"] = now
+                        # Payload unchanged and periodic resends disabled:
+                        # verify the connection is still alive with a tiny
+                        # ping instead of a full activity resend.
+                        if state["client"].ping():
+                            state["last_activity_sent"] = now
+                        else:
+                            log("arRPC connection lost, will reconnect", "warning")
+                            state["client"].close()
+                            state["last_activity_payload"] = None
+                            state["connection_failures"] += 1
+                            delay = retry_delay(state["connection_failures"])
+                            state["next_connection_attempt"] = time.monotonic() + delay
                     else:
                         try:
                             state["client"].send(

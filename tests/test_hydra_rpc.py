@@ -800,6 +800,57 @@ class HydraRpcTests(unittest.TestCase):
         self.assertTrue(should_send_activity({"name": "Other"}, payload, False))
         self.assertFalse(should_send_activity(dict(payload), payload, False))
 
+    def test_ping_probe(self):
+        import socket as stdlib_socket
+        import threading
+
+        RPCClient = NAMESPACE["RPCClient"]
+        encode_frame = NAMESPACE["encode_frame"]
+        read_frame = NAMESPACE["read_frame"]
+
+        mine, theirs = stdlib_socket.socketpair()
+
+        def serve_once():
+            try:
+                header = b""
+                while len(header) < 8:
+                    chunk = theirs.recv(8 - len(header))
+                    if not chunk:
+                        return
+                    header += chunk
+                msg_type, size = struct.unpack("<II", header)
+                data = b""
+                while len(data) < size:
+                    chunk = theirs.recv(size - len(data))
+                    if not chunk:
+                        return
+                    data += chunk
+                # Echo back as PONG, like arRPC does.
+                theirs.sendall(encode_frame(NAMESPACE["IPC_PONG"], json.loads(data)))
+            finally:
+                theirs.close()
+
+        server = threading.Thread(target=serve_once)
+        server.start()
+        try:
+            client = RPCClient.__new__(RPCClient)
+            client.sock = mine
+            client.nonce = 0
+            self.assertTrue(client.ping())
+        finally:
+            mine.close()
+            server.join(timeout=5)
+
+        dead_reader, dead_writer = stdlib_socket.socketpair()
+        dead_writer.close()
+        try:
+            dead_client = RPCClient.__new__(RPCClient)
+            dead_client.sock = dead_reader
+            dead_client.nonce = 0
+            self.assertFalse(dead_client.ping())
+        finally:
+            dead_reader.close()
+
     def test_poll_seconds_minimum_is_one_second(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
