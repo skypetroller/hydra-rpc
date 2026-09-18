@@ -178,37 +178,49 @@ other launchers can also use UMU.
 
 ## Emulated games
 
-Emulator support is off by default. Enable it with:
+ROM support is off by default. To turn it on:
 
-```json
-{
-  "emulators_enabled": true
-}
-```
+1. Open `~/.config/hydra-rpc/config.json` in a text editor.
+2. Add this setting inside the existing JSON object:
 
-Supported emulators: RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, and PPSSPP. The ROM
-or game path
-is read from the emulator's command line, so an emulator sitting idle in its menu
-(with no game loaded) is not reported. The emulator is shown as the activity and the
-ROM title appears in the activity details, for example `Playing RetroArch` with
-`Super Mario World` underneath.
+   ```json
+   "emulators_enabled": true
+   ```
 
-RetroArch, PCSX2, and Dolphin already have Discord application IDs. DuckStation,
-RPCS3, and PPSSPP do not, so they are skipped until you provide one — either create a Discord
-application at <https://discord.com/developers/applications> or reuse an existing ID:
+3. Save the file and restart the watcher.
+
+What happens next:
+
+1. Load a game in RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, or PPSSPP.
+2. The watcher reads the ROM or game path from the emulator's command line. An
+   emulator sitting idle in its menu, with no game loaded, is not reported.
+3. Discord shows the emulator as the activity, with the ROM title underneath — for
+   example, `Playing RetroArch` with `Super Mario World` below it.
+
+RetroArch, PCSX2, and Dolphin already have Discord application IDs, so they work as
+soon as you enable this. DuckStation, RPCS3, and PPSSPP do not, so they are skipped
+until you add an ID. Create one free at
+<https://discord.com/developers/applications>, then add it like this:
 
 ```json
 {
   "emulators_enabled": true,
   "emulator_application_ids": {
     "duckstation": "YOUR_DUCKSTATION_APP_ID",
-    "rpcs3": "YOUR_RPCS3_APP_ID"
+    "rpcs3": "YOUR_RPCS3_APP_ID",
+    "ppsspp": "YOUR_PPSSPP_APP_ID"
   }
 }
 ```
 
-For per-ROM control, add an override keyed by `emulator:rom-name` (lowercase) or by the
-full internal key:
+To check what the watcher sees without sending anything to Discord, run:
+
+```sh
+hydra-rpc --dry-run
+```
+
+For control over one specific ROM, add an override. The key is the emulator name, a
+colon, and the lowercase ROM title:
 
 ```json
 {
