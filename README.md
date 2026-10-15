@@ -544,6 +544,12 @@ For a game missing from Discord's database, add a manual mapping:
 
 ## Development
 
+Sources live in `src/` (`header`, `config`, `db`, `updater`, `ipc`,
+`detection`, `status`, `proc`, `main`); `./hydra-rpc` is the generated
+single-file bundle — edit `src/`, then run `python3 build.py` (CI enforces
+they match via `build.py --check`). Install and self-update flows still use
+the single file.
+
 Run the dependency-free test suite:
 
 ```sh
@@ -551,8 +557,13 @@ python3 -m unittest discover --start-directory tests --verbose
 # or:
 make test
 make lint   # syntax + JSON schema/example validation
-make check  # test + lint
+make check  # verify + test + lint + status-contract
 ```
+
+`make sha256` regenerates the committed `hydra-rpc.sha256` the updater
+verifies; commit it alongside any `hydra-rpc` change. Tagging `vX.Y.Z`
+publishes a GitHub Release with both files as assets (see
+`.github/workflows/release.yml`).
 
 Tests run automatically for pushes and pull requests through GitHub Actions.
 
