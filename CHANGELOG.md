@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- README documents the exact `--status --json` field set and the stability
+  policy (exact keys enforced by `scripts/check_status_contract.py` in CI).
+
 ## [1.0.0] - 2026-10-15
 
 ### Added
