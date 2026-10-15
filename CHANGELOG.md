@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-15
+
+### Added
+
+- Ed25519-signed update checksums: releases now also publish
+  `hydra-rpc.sha256.sig`, a signature over the checksum file. The updater
+  verifies it against `UPDATE_PUBLIC_KEYS` embedded in the running script and
+  refuses any update whose signature is present but invalid (tampered release
+  path). When no signature is published it falls back to checksum + syntax as
+  before. Includes `scripts/sign_artifact.py`, `scripts/check_sig.py`,
+  `make sign`, RFC 8032 test vectors (`tests/test_ed25519.py`), and a
+  multi-key list to make future key rotation safe. The private key lives
+  outside the repository (`~/.config/hydra-rpc/signing.key`).
+- Offline-hermetic status contract test: `scripts/check_status_contract.py`
+  now runs against a throwaway config/cache directory with a stub database, so
+  CI needs no network and the check is fast and deterministic.
+
+### Changed
+
+- Updater verification ladder is now: Ed25519 signature (fail closed when
+  published) → SHA256 checksum → Python syntax. `--check-update` exercises the
+  same path as `--update`.
+
+### Fixed
+
+- `RPCClient.ping()` now treats oversized/malformed IPC frames as a dead
+  connection (returns `False`, triggering reconnect) instead of letting the
+  `ValueError` escape to the loop's generic error handler.
+
+### Removed
+
+- Dead `wineserver` entry from the default blocklist and example config:
+  blocklist candidates must end in `.exe`, so it could never match.
+
 ## [1.0.1] - 2026-10-15
 
 ### Fixed

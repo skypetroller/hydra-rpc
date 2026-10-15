@@ -27,6 +27,10 @@ jobs:
         # against raw.githubusercontent.com. Regenerate with `make sha256`
         # whenever hydra-rpc changes; this job fails if it is stale.
         run: python3 scripts/check_sha.py --check
+      - name: Verify update signature
+        # hydra-rpc.sha256.sig is signed locally (key never leaves the
+        # maintainer machine; see scripts/sign_artifact.py) and committed.
+        run: python3 scripts/check_sig.py
       - name: Live status JSON contract
         run: python3 scripts/check_status_contract.py
       - name: Collect release notes
@@ -51,4 +55,4 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "hydra-rpc ${{ github.ref_name }}" \
             --notes-file release-notes.md \
-            hydra-rpc hydra-rpc.sha256
+            hydra-rpc hydra-rpc.sha256 hydra-rpc.sha256.sig

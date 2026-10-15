@@ -27,7 +27,6 @@
     }
   },
   "blocklist": [
-    "wineserver",
     "services.exe",
     "explorer.exe",
     "umu.exe"

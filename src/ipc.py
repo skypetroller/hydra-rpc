@@ -110,14 +110,15 @@ class RPCClient:
 
     def ping(self):
         # Cheap liveness probe: a few bytes round-trip instead of a full
-        # activity resend. Returns True only on a matching PONG echo,
-        # False on timeout/closed socket. Lets protocol errors propagate.
+        # activity resend. Returns True only on a matching PONG echo, False on
+        # timeout/closed socket/oversized frame (ValueError), so the loop
+        # treats protocol-level breakage as a dead connection and reconnects.
         try:
             self.nonce += 1
             payload = {"nonce": str(self.nonce)}
             self.sock.sendall(encode_frame(IPC_PING, payload))
             reply = read_frame(self.sock, PING_PROBE_TIMEOUT)
-        except OSError:
+        except (OSError, ValueError):
             return False
         return bool(reply) and reply[0] == IPC_PONG and reply[1] == payload
 

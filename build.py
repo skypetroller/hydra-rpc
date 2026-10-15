@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 MODULES = [
     "header.py",
+    "ed25519.py",
     "config.py",
     "db.py",
     "updater.py",

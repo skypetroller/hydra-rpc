@@ -33,6 +33,8 @@ jobs:
         run: python3 scripts/check_status_contract.py
       - name: Verify updater checksum file
         run: python3 scripts/check_sha.py --check
+      - name: Verify update signature
+        run: python3 scripts/check_sig.py
       - name: Validate desktop entry
         run: |
           sudo apt-get update

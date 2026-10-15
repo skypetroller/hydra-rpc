@@ -1,7 +1,9 @@
-"""Edge-case tests for socket discovery and the hardened updater."""
+"""Edge-case tests for socket discovery, the hardened updater, and the IPC ping."""
 
+import base64
 import hashlib
 import io
+import os
 import unittest
 import urllib.error
 from pathlib import Path
@@ -14,6 +16,8 @@ exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), NAMESPACE)
 
 SOURCE = NAMESPACE["validate_update_source"](Path(
     __file__).parents[1].joinpath("hydra-rpc").read_bytes())
+
+SIG_404 = urllib.error.HTTPError("url", 404, "not found", {}, io.BytesIO(b""))
 
 
 class FakeResponse:
@@ -30,9 +34,15 @@ class FakeResponse:
         return self._payload
 
 
-def urlopen_for(source, sha_body=None, sha_error=None):
+def urlopen_for(source, sha_body=None, sha_error=None, sig_body=None, sig_error=SIG_404):
     def fake_urlopen(req, *args, **kwargs):
         url = req.full_url if hasattr(req, "full_url") else str(req)
+        if url.endswith(".sha256.sig"):
+            if sig_body is not None:
+                return FakeResponse(sig_body)
+            if sig_error is not None:
+                raise sig_error
+            return FakeResponse(sig_body)
         if url.endswith(".sha256"):
             if sha_error is not None:
                 raise sha_error
@@ -84,6 +94,109 @@ class UpdaterChecksumTests(unittest.TestCase):
             side_effect=urlopen_for(SOURCE, b"not-a-checksum"),
         ):
             self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+
+
+class UpdaterSignatureTests(unittest.TestCase):
+    # Fixed seed (RFC 8032 TEST 2) as a deterministic test key.
+    SEED = bytes.fromhex(
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+
+    def setUp(self):
+        public = NAMESPACE["ed25519_public_key"](self.SEED)
+        keys = patch.dict(NAMESPACE, {"UPDATE_PUBLIC_KEYS": (public.hex(),)})
+        keys.start()
+        self.addCleanup(keys.stop)
+        self.checksum_body = f"{hashlib.sha256(SOURCE).hexdigest()}  hydra-rpc\n".encode()
+        self.signature_body = self._sign(self.checksum_body, self.SEED)
+
+    def _sign(self, body, seed):
+        signature = NAMESPACE["ed25519_sign"](body, seed)
+        return b"untrusted comment: test\n" + base64.b64encode(signature) + b"\n"
+
+    def _fetch(self, **kwargs):
+        kwargs.setdefault("sha_body", self.checksum_body)
+        if "sig_body" not in kwargs and "sig_error" not in kwargs:
+            kwargs["sig_body"] = self.signature_body
+        with patch.object(
+            NAMESPACE["urllib"].request, "urlopen",
+            side_effect=urlopen_for(SOURCE, **kwargs),
+        ):
+            return NAMESPACE["fetch_update_source"]()
+
+    def test_signed_release_accepted(self):
+        self.assertEqual(self._fetch(), SOURCE)
+
+    def test_tampered_checksum_rejected(self):
+        tampered = f"{'0' * 64}  hydra-rpc\n".encode()
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sha_body=tampered)
+        self.assertIn("signature", str(ctx.exception))
+
+    def test_tampered_signature_rejected(self):
+        raw = bytearray(base64.b64decode(self.signature_body.splitlines()[1]))
+        raw[5] ^= 1
+        bad_body = b"untrusted comment: test\n" + base64.b64encode(bytes(raw)) + b"\n"
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sig_body=bad_body)
+        self.assertIn("signature", str(ctx.exception))
+
+    def test_wrong_key_rejected(self):
+        other_seed = os.urandom(32)
+        with self.assertRaises(ValueError):
+            self._fetch(sig_body=self._sign(self.checksum_body, other_seed))
+
+    def test_malformed_signature_rejected(self):
+        with self.assertRaises(ValueError):
+            self._fetch(sig_body=b"untrusted comment: test\nnot base64!!!\n")
+        with self.assertRaises(ValueError):
+            self._fetch(sig_body=b"untrusted comment: test\n")
+
+    def test_signature_without_checksum_rejected(self):
+        with self.assertRaises(ValueError):
+            self._fetch(sha_error=SIG_404)
+
+    def test_unpublished_signature_falls_back_to_checksum(self):
+        # Older releases have a checksum but no .sig: keep working.
+        self.assertEqual(self._fetch(sig_error=SIG_404), SOURCE)
+
+    def test_unsigned_and_unchecksummed_still_syntax_only(self):
+        self.assertEqual(
+            self._fetch(sha_error=SIG_404, sig_error=SIG_404), SOURCE)
+
+
+class PingProbeTests(unittest.TestCase):
+    class FakeSocket:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+    def test_ping_returns_false_on_dead_socket(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc")
+        client.sock = self.FakeSocket()
+        client.sock.sendall = lambda data: (_ for _ in ()).throw(OSError("broken pipe"))
+        self.assertFalse(client.ping())
+
+    def test_ping_returns_false_on_oversized_frame(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc")
+        client.sock = self.FakeSocket()
+
+        def oversized(sock, timeout):
+            raise ValueError("IPC frame too large: 999999999")
+
+        with patch.dict(NAMESPACE, {"read_frame": oversized}):
+            self.assertFalse(client.ping())
+
+    def test_ping_returns_true_on_pong(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc")
+        client.sock = self.FakeSocket()
+
+        def pong(sock, timeout):
+            return (NAMESPACE["IPC_PONG"], {"nonce": "1"})
+
+        with patch.dict(NAMESPACE, {"read_frame": pong}):
+            self.assertTrue(client.ping())
 
 
 class SocketDiscoveryTests(unittest.TestCase):

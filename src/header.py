@@ -8,6 +8,7 @@ Vesktop or any other arRPC client.
 """
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -35,8 +36,16 @@ SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
 UPDATE_SHA_URL = UPDATE_URL + ".sha256"
+UPDATE_SIG_URL = UPDATE_SHA_URL + ".sig"
+# Ed25519 public keys trusted to sign hydra-rpc.sha256.sig (hex). The updater
+# refuses an update whose signature does not verify against one of these; when
+# rotating the key, ship a release listing both old and new, then switch.
+# Fingerprint of the first key (sha256, first 16 hex chars): 1215387a4796f96d
+UPDATE_PUBLIC_KEYS = (
+    "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
+)
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.0.1"
+SCRIPT_VERSION = "1.1.0"
 UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
@@ -121,7 +130,6 @@ IPC_PONG = 4
 
 # Windows processes we should never report as "games".
 DEFAULT_BLOCKLIST = {
-    "wineserver",
     "winedevice.exe",
     "services.exe",
     "plugplay.exe",

@@ -293,11 +293,25 @@ If it is installed in `/usr/local/bin`, use:
 sudo /usr/local/bin/hydra-rpc --update
 ```
 
-The updater uses HTTPS, checks the downloaded file's Python syntax, preserves executable
-permissions, and replaces the file atomically. Restart the watcher after updating. It is
-explicit and does not update silently at startup. When a `hydra-rpc.sha256` file is
-published next to the script, its SHA256 is verified before install; when absent,
-the updater logs that only syntax was verified and continues.
+The updater uses HTTPS, preserves executable permissions, and replaces the file
+atomically. Restart the watcher after updating. It is explicit and does not
+update silently at startup.
+
+Before installing, the download is verified in layers:
+
+1. **Ed25519 signature** — `hydra-rpc.sha256.sig` (a signature over the exact
+   bytes of the checksum file) must verify against a release key embedded in
+   the running script (`UPDATE_PUBLIC_KEYS`). A published signature that does
+   not verify is a hard failure: the updater refuses the update.
+2. **SHA256 checksum** — the downloaded script must match `hydra-rpc.sha256`.
+3. **Syntax check** — always performed. When neither a signature nor a checksum
+   is published (e.g. an old mirror), the updater logs that only syntax was
+   verified and continues.
+
+Releases attach `hydra-rpc`, `hydra-rpc.sha256`, and `hydra-rpc.sha256.sig`.
+Key rotation ships a release whose `UPDATE_PUBLIC_KEYS` lists both the old and
+the new key, so existing installs keep updating; the signing key is then
+switched. Verify a checkout with `make verify` or `python3 scripts/check_sig.py`.
 
 ## Troubleshooting
 
@@ -323,7 +337,7 @@ diagnostics go to stderr). Top-level shape (`version: 1`):
 {
   "version": 1,
   "timestamp": "2026-10-15T12:00:00Z",
-  "script": {"path": "/usr/local/bin/hydra-rpc", "version": "1.0.0"},
+  "script": {"path": "/usr/local/bin/hydra-rpc", "version": "1.1.0"},
   "config_version": 1,
   "db": {"url": "...", "cached_at": 1729000000, "cached_age_seconds": 3600, "entries": 10216},
   "socket": {"found": true, "path": "/run/user/1000/discord-ipc-0", "attempts_tried": ["..."], "last_error": ""},
@@ -567,9 +581,13 @@ make check  # verify + test + lint + status-contract
 ```
 
 `make sha256` regenerates the committed `hydra-rpc.sha256` the updater
-verifies; commit it alongside any `hydra-rpc` change. Tagging `vX.Y.Z`
-publishes a GitHub Release with both files as assets (see
-`.github/workflows/release.yml`).
+verifies; `make sign` signs it into `hydra-rpc.sha256.sig` using the private
+key at `~/.config/hydra-rpc/signing.key` or `$HYDRA_RPC_SIGNING_KEY`
+(hex/base64, never committed). Commit the bundle, checksum, and signature
+together; CI fails when the signature is stale (`scripts/check_sig.py`). The
+public half is embedded in the script (`UPDATE_PUBLIC_KEYS`, fingerprint
+`1215387a4796f96d`). Tagging `vX.Y.Z` publishes a GitHub Release with the
+three files as assets (see `.github/workflows/release.yml`).
 
 Tests run automatically for pushes and pull requests through GitHub Actions.
 

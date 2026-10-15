@@ -7,6 +7,7 @@ Vesktop or any other arRPC client.
 """
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -34,8 +35,16 @@ SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
 UPDATE_SHA_URL = UPDATE_URL + ".sha256"
+UPDATE_SIG_URL = UPDATE_SHA_URL + ".sig"
+# Ed25519 public keys trusted to sign hydra-rpc.sha256.sig (hex). The updater
+# refuses an update whose signature does not verify against one of these; when
+# rotating the key, ship a release listing both old and new, then switch.
+# Fingerprint of the first key (sha256, first 16 hex chars): 1215387a4796f96d
+UPDATE_PUBLIC_KEYS = (
+    "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
+)
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.0.1"
+SCRIPT_VERSION = "1.1.0"
 UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
@@ -120,7 +129,6 @@ IPC_PONG = 4
 
 # Windows processes we should never report as "games".
 DEFAULT_BLOCKLIST = {
-    "wineserver",
     "winedevice.exe",
     "services.exe",
     "plugplay.exe",
@@ -171,6 +179,144 @@ DEFAULT_CONFIG = {
     "blocklist": sorted(DEFAULT_BLOCKLIST),
     "overrides": {},
 }
+
+
+# Minimal, dependency-free Ed25519 (RFC 8032) used to verify signed update
+# checksums. Points use extended homogeneous coordinates, so a full
+# verification needs no field inversions (fast enough for a one-shot update).
+ED25519_SEED_SIZE = 32
+ED25519_PUBLIC_KEY_SIZE = 32
+ED25519_SIGNATURE_SIZE = 64
+
+_ED_P = 2**255 - 19
+_ED_L = 2**252 + 27742317777372353535851937790883648493
+_ED_D = (-121665 * pow(121666, _ED_P - 2, _ED_P)) % _ED_P
+_ED_D2 = (2 * _ED_D) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+_ED_IDENTITY = (0, 1, 1, 0)
+
+
+def _ed_bit(data, index):
+    return (data[index >> 3] >> (index & 7)) & 1
+
+
+def _ed_inv(value):
+    return pow(value, _ED_P - 2, _ED_P)
+
+
+def _ed_hint(data):
+    digest = hashlib.sha512(data).digest()
+    return sum(2**i * _ed_bit(digest, i) for i in range(512))
+
+
+def _ed_xrecover(y):
+    xx = (y * y - 1) * _ed_inv(_ED_D * y * y + 1)
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P != 0:
+        x = (x * _ED_I) % _ED_P
+    if x % 2 != 0:
+        x = _ED_P - x
+    return x
+
+
+_ED_BY = (4 * _ed_inv(5)) % _ED_P
+_ED_BX = _ed_xrecover(_ED_BY)
+_ED_BASE = (_ED_BX, _ED_BY, 1, _ED_BX * _ED_BY % _ED_P)
+
+
+def _ed_add(point1, point2):
+    # Unified (complete) twisted-Edwards addition: valid for doubling too.
+    x1, y1, z1, t1 = point1
+    x2, y2, z2, t2 = point2
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = t1 * _ED_D2 % _ED_P * t2 % _ED_P
+    dd = z1 * 2 * z2 % _ED_P
+    e = (b - a) % _ED_P
+    f = (dd - c) % _ED_P
+    g = (dd + c) % _ED_P
+    h = (b + a) % _ED_P
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_scalarmult(point, scalar):
+    result = _ED_IDENTITY
+    addend = point
+    while scalar > 0:
+        if scalar & 1:
+            result = _ed_add(result, addend)
+        addend = _ed_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def _ed_point_eq(point1, point2):
+    x1, y1, z1, _ = point1
+    x2, y2, z2, _ = point2
+    return (x1 * z2 - x2 * z1) % _ED_P == 0 and (y1 * z2 - y2 * z1) % _ED_P == 0
+
+
+def _ed_encode_point(point):
+    x, y, z, _ = point
+    zinv = _ed_inv(z)
+    aff_x = x * zinv % _ED_P
+    aff_y = y * zinv % _ED_P
+    return (aff_y | ((aff_x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed_decode_point(data):
+    if len(data) != 32:
+        raise ValueError("Ed25519 point must be 32 bytes")
+    value = int.from_bytes(data, "little")
+    y = value & ((1 << 255) - 1)
+    if y >= _ED_P:
+        raise ValueError("Ed25519 point is not canonical")
+    x = _ed_xrecover(y)
+    if (x & 1) != ((value >> 255) & 1):
+        x = _ED_P - x
+    if (-x * x + y * y - 1 - _ED_D * x * x * y * y) % _ED_P != 0:
+        raise ValueError("Ed25519 point is not on the curve")
+    return (x, y, 1, x * y % _ED_P)
+
+
+def _ed_scalar_from_digest(digest):
+    # RFC 8032 clamp: clear the low 3 bits, clear bit 255, set bit 254.
+    return 2**254 + sum(2**i * _ed_bit(digest, i) for i in range(3, 254))
+
+
+def ed25519_public_key(seed):
+    if len(seed) != ED25519_SEED_SIZE:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    digest = hashlib.sha512(seed).digest()
+    return _ed_encode_point(_ed_scalarmult(_ED_BASE, _ed_scalar_from_digest(digest)))
+
+
+def ed25519_sign(message, seed):
+    if len(seed) != ED25519_SEED_SIZE:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    digest = hashlib.sha512(seed).digest()
+    scalar = _ed_scalar_from_digest(digest)
+    public_key = _ed_encode_point(_ed_scalarmult(_ED_BASE, scalar))
+    r = _ed_hint(digest[32:64] + message)
+    encoded_r = _ed_encode_point(_ed_scalarmult(_ED_BASE, r))
+    k = _ed_hint(encoded_r + public_key + message)
+    s = (r + k * scalar) % _ED_L
+    return encoded_r + s.to_bytes(32, "little")
+
+
+def ed25519_verify(signature, message, public_key):
+    if len(signature) != ED25519_SIGNATURE_SIZE or len(public_key) != ED25519_PUBLIC_KEY_SIZE:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:  # reject non-canonical scalars (malleable signatures)
+        return False
+    try:
+        r = _ed_decode_point(signature[:32])
+        a = _ed_decode_point(public_key)
+    except ValueError:
+        return False
+    k = _ed_hint(signature[:32] + public_key + message)
+    return _ed_point_eq(_ed_scalarmult(_ED_BASE, s), _ed_add(r, _ed_scalarmult(a, k)))
 
 
 def log(msg, level="info"):
@@ -631,25 +777,91 @@ def validate_update_source(source):
     return source
 
 
-def fetch_update_checksum():
-    # Best-effort SHA256 check against UPDATE_URL.sha256 ("<hex>  <name>" or bare hex).
-    # Returns the expected hex digest, or None when no checksum is published.
+def fetch_update_checksum_body():
+    # Best-effort fetch of UPDATE_SHA_URL; returns the raw bytes (needed for
+    # signature verification) or None when no checksum is published.
     req = urllib.request.Request(UPDATE_SHA_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            text = response.read().decode("utf-8").strip().split()
+            return response.read()
     except Exception:
         return None
-    if not text or any(c not in "0123456789abcdefABCDEF" for c in text[0]) or len(text[0]) != 64:
+
+
+def checksum_from_body(body):
+    # Accepts "<hex>  <name>" or bare hex; returns the lowercase digest or None.
+    try:
+        text = body.decode("utf-8").strip().split()
+    except (AttributeError, UnicodeDecodeError):
+        return None
+    if not text or len(text[0]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in text[0]):
         return None
     return text[0].lower()
+
+
+def fetch_update_signature_body():
+    # Best-effort fetch of UPDATE_SIG_URL; returns raw bytes or None.
+    req = urllib.request.Request(UPDATE_SIG_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
+            return response.read()
+    except Exception:
+        return None
+
+
+def parse_update_signature(body):
+    # Format: optional "untrusted comment: ..." lines, then one base64 line
+    # holding the 64-byte Ed25519 signature. Returns bytes or None.
+    try:
+        lines = body.decode("utf-8").splitlines()
+    except (AttributeError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("untrusted comment:"):
+            continue
+        try:
+            signature = base64.b64decode(line, validate=True)
+        except Exception:
+            return None
+        return signature if len(signature) == ED25519_SIGNATURE_SIZE else None
+    return None
+
+
+def verify_update_signature(checksum_body, signature):
+    # True when `signature` is a valid Ed25519 signature over the exact bytes
+    # of `checksum_body` for one of the embedded UPDATE_PUBLIC_KEYS.
+    for key_hex in UPDATE_PUBLIC_KEYS:
+        try:
+            public_key = bytes.fromhex(key_hex)
+        except ValueError:
+            continue
+        if ed25519_verify(signature, checksum_body, public_key):
+            return True
+    return False
 
 
 def fetch_update_source():
     req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
         source = response.read()
-    expected = fetch_update_checksum()
+    checksum_body = fetch_update_checksum_body()
+    signature_body = fetch_update_signature_body()
+    if signature_body is not None:
+        # A published signature is authoritative: fail closed if anything
+        # about it (or the checksum it covers) is off.
+        if checksum_body is None:
+            raise ValueError(
+                "update is signed but its checksum file could not be fetched; refusing update"
+            )
+        signature = parse_update_signature(signature_body)
+        if signature is None or not verify_update_signature(checksum_body, signature):
+            raise ValueError(
+                "update signature verification failed (tampered release or unknown key); "
+                "refusing update"
+            )
+        log("update signature verified", "debug")
+    expected = checksum_from_body(checksum_body) if checksum_body is not None else None
     if expected is not None:
         actual = hashlib.sha256(source).hexdigest()
         if actual != expected:
@@ -821,14 +1033,15 @@ class RPCClient:
 
     def ping(self):
         # Cheap liveness probe: a few bytes round-trip instead of a full
-        # activity resend. Returns True only on a matching PONG echo,
-        # False on timeout/closed socket. Lets protocol errors propagate.
+        # activity resend. Returns True only on a matching PONG echo, False on
+        # timeout/closed socket/oversized frame (ValueError), so the loop
+        # treats protocol-level breakage as a dead connection and reconnects.
         try:
             self.nonce += 1
             payload = {"nonce": str(self.nonce)}
             self.sock.sendall(encode_frame(IPC_PING, payload))
             reply = read_frame(self.sock, PING_PROBE_TIMEOUT)
-        except OSError:
+        except (OSError, ValueError):
             return False
         return bool(reply) and reply[0] == IPC_PONG and reply[1] == payload
 

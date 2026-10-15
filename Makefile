@@ -2,13 +2,14 @@ PREFIX ?= /usr/local/bin
 SYSTEMD_USER_DIR ?= $(HOME)/.config/systemd/user
 AUTOSTART_DIR ?= $(HOME)/.config/autostart
 
-.PHONY: install install-user uninstall test lint validate-desktop check help build verify sha256 status-contract schema-check
+.PHONY: install install-user uninstall test lint validate-desktop check help build verify sha256 sign status-contract schema-check
 
 help:
 	@echo "Targets:"
 	@echo "  build           - regenerate ./hydra-rpc bundle from src/ (verified AST-identical)"
-	@echo "  verify          - fail if bundle drifts from src/ or sha256 is stale"
+	@echo "  verify          - fail if bundle drifts from src/ or sha256/signature is stale"
 	@echo "  sha256          - (re)generate hydra-rpc.sha256 for the updater"
+	@echo "  sign            - (re)sign hydra-rpc.sha256 -> hydra-rpc.sha256.sig"
 	@echo "  install         - build + install to \$$(PREFIX)/hydra-rpc (needs sudo for /usr/local)"
 	@echo "  install-user    - build + install to ~/.local/bin/hydra-rpc (no sudo)"
 	@echo "  uninstall       - remove installed script"
@@ -24,10 +25,14 @@ build:
 verify:
 	python3 build.py --check
 	python3 scripts/check_sha.py --check
+	python3 scripts/check_sig.py
 
 sha256:
 	python3 scripts/check_sha.py --generate
-	@echo "Wrote hydra-rpc.sha256 (commit it so the updater can verify)"
+	@echo "Wrote hydra-rpc.sha256; now run: make sign (then commit both)"
+
+sign:
+	python3 scripts/sign_artifact.py hydra-rpc.sha256 hydra-rpc.sha256.sig
 
 install: build
 	install -Dm755 hydra-rpc $(DESTDIR)$(PREFIX)/hydra-rpc
