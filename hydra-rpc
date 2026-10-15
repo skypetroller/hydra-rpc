@@ -33,6 +33,8 @@ SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
+UPDATE_SHA_URL = UPDATE_URL + ".sha256"
+CONFIG_VERSION = 1
 UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
@@ -143,6 +145,7 @@ DEFAULT_BLOCKLIST = {
 }
 
 DEFAULT_CONFIG = {
+    "config_version": CONFIG_VERSION,
     "poll_seconds": 5,
     "activity_refresh_seconds": 60,
     "refresh_unchanged_activities": True,
@@ -220,6 +223,24 @@ def is_valid_app_id(value):
         return False
     text = value.strip()
     return text == "" or text.isdigit()
+
+
+def migrate_config(cfg, from_version, to_version):
+    # Stub for future renames/removals: today it only explains what happened.
+    # New settings already merged from DEFAULT_CONFIG; nothing else to rewrite.
+    if from_version < 1:
+        log(
+            "older config format detected (no config_version); "
+            "new settings use defaults (run hydra-rpc --validate-config to check)",
+            "warning",
+        )
+    elif from_version < to_version:
+        log(
+            f"config version {from_version} is older than {to_version}; "
+            "new settings use defaults",
+            "warning",
+        )
+    return cfg
 
 
 def load_config():
@@ -417,6 +438,14 @@ def load_config():
                 "while socket_path is set",
                 "warning",
             )
+    try:
+        config_version = int(cfg.get("config_version", 0))
+    except (TypeError, ValueError):
+        config_version = 0
+        log("invalid config_version; assuming an older config format", "warning")
+    if config_version < CONFIG_VERSION:
+        migrate_config(cfg, config_version, CONFIG_VERSION)
+    cfg["config_version"] = CONFIG_VERSION
     return cfg
 
 
@@ -434,6 +463,26 @@ def download_db(url):
     req = urllib.request.Request(url, headers={"User-Agent": "hydra-rpc/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+# Metadata about the last load_db() call, used by build_status_report().
+_DB_INFO = {"cached_at": None, "fresh": None, "stale_fallback": False}
+
+
+def format_age(seconds):
+    try:
+        seconds = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "unknown age"
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def build_index(db):
@@ -455,6 +504,13 @@ def build_index(db):
 
 
 def load_db(cfg):
+    global _DB_INFO
+    _DB_INFO = {"cached_at": None, "fresh": None, "stale_fallback": False}
+    try:
+        if os.path.exists(DB_CACHE):
+            _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+    except OSError:
+        pass
     cached = None
     if os.path.exists(DB_CACHE):
         try:
@@ -462,6 +518,7 @@ def load_db(cfg):
             if age < cfg["db_ttl_seconds"]:
                 with open(DB_CACHE, "r") as f:
                     cached = json.load(f)
+                log(f"using cached game database from {format_age(age)} ago", "debug")
         except Exception as e:
             log(f"failed to load cached db ({e})", "warning")
 
@@ -475,12 +532,29 @@ def load_db(cfg):
                 json.dump(db, f)
             os.replace(tmp, DB_CACHE)
             log(f"cached {len(db)} detectable applications")
+            try:
+                _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+            except OSError:
+                pass
+            _DB_INFO["fresh"] = True
             cached = db
         except Exception as e:
-            log(f"could not download db ({e})", "warning")
             if os.path.exists(DB_CACHE):
+                try:
+                    stale_age = time.time() - os.path.getmtime(DB_CACHE)
+                except OSError:
+                    stale_age = None
+                age_text = format_age(stale_age) if stale_age is not None else "unknown age"
+                log(
+                    f"could not download db ({e}); using stale cache from "
+                    f"{age_text} ago with limited detection",
+                    "warning",
+                )
+                _DB_INFO["stale_fallback"] = True
                 with open(DB_CACHE, "r") as f:
                     cached = json.load(f)
+            else:
+                log(f"could not download db ({e}); no cache available", "error")
 
     return build_index(cached) if cached else {}
 
@@ -553,10 +627,35 @@ def validate_update_source(source):
     return source
 
 
+def fetch_update_checksum():
+    # Best-effort SHA256 check against UPDATE_URL.sha256 ("<hex>  <name>" or bare hex).
+    # Returns the expected hex digest, or None when no checksum is published.
+    req = urllib.request.Request(UPDATE_SHA_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
+            text = response.read().decode("utf-8").strip().split()
+    except Exception:
+        return None
+    if not text or any(c not in "0123456789abcdefABCDEF" for c in text[0]) or len(text[0]) != 64:
+        return None
+    return text[0].lower()
+
+
 def fetch_update_source():
     req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
         source = response.read()
+    expected = fetch_update_checksum()
+    if expected is not None:
+        actual = hashlib.sha256(source).hexdigest()
+        if actual != expected:
+            raise ValueError(
+                "update checksum mismatch (expected "
+                f"{expected[:12]}..., got {actual[:12]}...); refusing update"
+            )
+        log("update checksum verified", "debug")
+    else:
+        log("no update checksum published; verified Python syntax only", "debug")
     return validate_update_source(source)
 
 
@@ -1153,6 +1252,7 @@ def collect_status(cfg, index, include_exe_blocklisted=True):
                 "matched": True,
                 "reason": "matched",
                 "app_id": game["app_id"],
+                "game_name": game["game_name"],
                 "display_name": game["display_name"],
                 "sources": sorted(info.get("sources", set())) if isinstance(info, dict) else [],
             })
@@ -1202,12 +1302,110 @@ def format_status_table(entries):
 
 
 def print_status(cfg, index, as_json=False):
-    entries = collect_status(cfg, index)
     if as_json:
-        print(json.dumps(entries, indent=2, sort_keys=True))
-    else:
-        print(format_status_table(entries))
+        report = build_status_report(cfg, index)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return report
+    entries = collect_status(cfg, index)
+    print(format_status_table(entries))
     return entries
+
+
+def probe_sockets(cfg):
+    """Check arRPC socket candidates without sending any activity."""
+    base = runtime_dir(cfg) + "/discord-ipc"
+    client = RPCClient(
+        base,
+        cfg.get("socket_path", ""),
+        cfg["max_socket_attempts"],
+    )
+    tried = []
+    found = ""
+    last_error = ""
+    for path in client.candidate_paths():
+        tried.append(path)
+        client.path = path
+        try:
+            probe = client._connect()
+            probe.close()
+            found = path
+            break
+        except OSError as e:
+            last_error = str(e)
+    return {
+        "found": bool(found),
+        "path": found,
+        "attempts_tried": tried,
+        "last_error": last_error,
+    }
+
+
+STATUS_REPORT_VERSION = 1
+
+
+def build_status_report(cfg, index):
+    """Structured diagnostics: versioned top-level object for scripts/bug reports."""
+    entries = collect_status(cfg, index)
+    detected = []
+    skipped = []
+    for entry in entries:
+        if entry["matched"]:
+            if entry["kind"] == "emulator":
+                matched_by = "emulator"
+            elif entry["exe"] in cfg.get("overrides", {}):
+                matched_by = "override"
+            else:
+                matched_by = "database"
+            detected.append({
+                "exe": entry["exe"],
+                "app_id": entry["app_id"],
+                "game_name": entry.get("game_name", ""),
+                "display_name": entry.get("display_name", ""),
+                "pid": entry["pid"],
+                "kind": entry["kind"],
+                "matched_by": matched_by,
+                "sources": entry["sources"],
+            })
+        else:
+            skipped.append({
+                "exe": entry["exe"],
+                "pid": entry["pid"],
+                "kind": entry["kind"],
+                "reason": entry["reason"],
+                "app_id": entry["app_id"],
+                "sources": entry["sources"],
+            })
+    cached_at = None
+    cached_age_seconds = None
+    try:
+        if os.path.exists(DB_CACHE):
+            cached_at = int(os.path.getmtime(DB_CACHE))
+            cached_age_seconds = max(0, int(time.time()) - cached_at)
+    except OSError:
+        cached_at = None
+        cached_age_seconds = None
+    notes = []
+    if _DB_INFO.get("stale_fallback"):
+        notes.append(
+            "database download failed; using stale cache from "
+            f"{format_age(cached_age_seconds) if cached_age_seconds is not None else 'unknown age'} ago"
+        )
+    return {
+        "version": STATUS_REPORT_VERSION,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "script": {"path": installed_script_path()},
+        "config_version": cfg.get("config_version", CONFIG_VERSION),
+        "db": {
+            "url": cfg.get("db_url", DB_URL),
+            "cached_at": cached_at,
+            "cached_age_seconds": cached_age_seconds,
+            "entries": len(index),
+        },
+        "socket": probe_sockets(cfg),
+        "detected": detected,
+        "skipped": skipped,
+        "notes": notes,
+    }
 
 
 def close_state(state):
