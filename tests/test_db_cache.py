@@ -76,6 +76,21 @@ class DbCacheTests(unittest.TestCase):
         self.assertEqual(fmt(7200), "2h")
         self.assertEqual(fmt(3 * 24 * 3600), "3d")
 
+    def test_prune_sessions_with_mixed_types_and_over_cap(self):
+        # Regression: sort key must not compare str/int when a legacy or
+        # hand-edited cache mixes types and exceeds MAX_SESSION_ENTRIES.
+        now_ms = 1_700_000_000_000
+        sessions = {
+            f"a{i}.exe": {"start_ms": now_ms - 1000, "pid": i, "start_tick": i}
+            for i in range(300)
+        }
+        sessions["str.exe"] = {
+            "start_ms": str(now_ms - 500), "pid": 9, "start_tick": 9,
+        }
+        pruned = NAMESPACE["prune_sessions"](sessions, now_ms)
+        self.assertEqual(len(pruned), NAMESPACE["MAX_SESSION_ENTRIES"])
+        self.assertIn("str.exe", pruned)
+
     def test_max_activities_limits_reported_games(self):
         cfg = make_cfg(max_activities=1)
         cfg["blocklist_ids"] = set()

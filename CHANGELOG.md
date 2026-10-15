@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-15
+
+### Fixed
+
+- `prune_sessions` no longer raises `TypeError` when a sessions cache mixes
+  numeric and string `start_ms` values and exceeds the 256-entry cap
+  (sort key now normalises with `int()`).
+- `--validate-config` no longer double-prefixes "warning:" for an empty game
+  database.
+
 ### Added
 
 - README documents the exact `--status --json` field set and the stability

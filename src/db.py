@@ -119,7 +119,10 @@ def prune_sessions(sessions, now_ms=None):
         if 0 < start_ms <= now_ms and now_ms - start_ms <= STALE_SESSION_MAX_AGE_MS:
             valid[exe] = record
     if len(valid) > MAX_SESSION_ENTRIES:
-        newest = sorted(valid, key=lambda exe: valid[exe]["start_ms"])[-MAX_SESSION_ENTRIES:]
+        # int() is safe here: every entry above passed int(record["start_ms"]).
+        newest = sorted(
+            valid, key=lambda exe: int(valid[exe]["start_ms"])
+        )[-MAX_SESSION_ENTRIES:]
         valid = {exe: valid[exe] for exe in newest}
     return valid
 

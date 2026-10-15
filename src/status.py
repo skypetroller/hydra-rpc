@@ -41,7 +41,7 @@ def parse_args(argv=None):
 def validate_config(cfg, index):
     ok = True
     if not index:
-        log("warning: game database is empty; games will need overrides", "warning")
+        log("game database is empty; games will need overrides", "warning")
     for emulator in sorted(cfg.get("emulator_application_ids", {})):
         app_id = cfg["emulator_application_ids"][emulator]
         if cfg.get("emulators_enabled") and not app_id:
