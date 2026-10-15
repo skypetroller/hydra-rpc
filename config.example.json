@@ -1,4 +1,5 @@
 {
+  "config_version": 1,
   "poll_seconds": 5,
   "activity_refresh_seconds": 60,
   "refresh_unchanged_activities": true,

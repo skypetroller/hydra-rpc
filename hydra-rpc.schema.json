@@ -4,6 +4,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "config_version": {"type": "integer", "minimum": 1, "default": 1},
     "poll_seconds": {"type": "number", "minimum": 1, "default": 5},
     "activity_refresh_seconds": {"type": "number", "minimum": 1, "default": 60},
     "refresh_unchanged_activities": {"type": "boolean", "default": true},

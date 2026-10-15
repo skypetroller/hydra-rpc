@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Structured `--status --json` report (`version: 1`): timestamp, script path,
+  `config_version`, `db` (url, cached_at, cached_age_seconds, entries), `socket`
+  (found, path, attempts_tried, last_error), `detected` (with
+  `matched_by: database|override|emulator`), `skipped` (with reasons), `notes`.
+  Stdout stays pure JSON (diagnostics go to stderr).
+- `config_version: 1` in config: legacy configs log a migration hint and missing
+  keys use defaults; `ensure_config` writes it for new installs. Schema and
+  example updated.
+- DB cache diagnostics: fresh-cache age logged at debug level; download failures
+  warn explicitly ("using stale cache from X ago with limited detection") and add
+  a `notes` entry to the status report.
+- Tolerant updater SHA256 check: verifies against `hydra-rpc.sha256` when
+  published, refuses on mismatch, otherwise continues with syntax validation.
+- Edge-case tests: `test_status_json.py`, `test_config_migration.py`,
+  `test_updater_socket.py` (checksum + socket discovery), `test_db_cache.py`
+  (fresh/expired/offline cache, `max_activities`). 73 tests total.
+
+### Added
+
 - `Makefile` with `install`, `install-user`, `uninstall`, `test`, `lint`, `check` targets.
 - `config.example.json` with every supported setting and realistic override examples.
 - `hydra-rpc.schema.json` (JSON Schema draft 2020-12) for editor validation of `config.json`.

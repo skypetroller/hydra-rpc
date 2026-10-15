@@ -295,7 +295,9 @@ sudo /usr/local/bin/hydra-rpc --update
 
 The updater uses HTTPS, checks the downloaded file's Python syntax, preserves executable
 permissions, and replaces the file atomically. Restart the watcher after updating. It is
-explicit and does not update silently at startup.
+explicit and does not update silently at startup. When a `hydra-rpc.sha256` file is
+published next to the script, its SHA256 is verified before install; when absent,
+the updater logs that only syntax was verified and continues.
 
 ## Troubleshooting
 
@@ -312,6 +314,23 @@ matched (no Discord traffic). Ideal for bug reports:
 ```sh
 hydra-rpc --status
 hydra-rpc --status --json > status.json
+```
+
+`--status --json` emits a stable, versioned object (stdout is pure JSON;
+diagnostics go to stderr). Top-level shape (`version: 1`):
+
+```json
+{
+  "version": 1,
+  "timestamp": "2026-10-15T12:00:00Z",
+  "script": {"path": "/usr/local/bin/hydra-rpc"},
+  "config_version": 1,
+  "db": {"url": "...", "cached_at": 1729000000, "cached_age_seconds": 3600, "entries": 10216},
+  "socket": {"found": true, "path": "/run/user/1000/discord-ipc-0", "attempts_tried": ["..."], "last_error": ""},
+  "detected": [{"exe": "Game.exe", "app_id": "123", "game_name": "Game", "pid": 1234, "kind": "wine", "matched_by": "database|override|emulator", "sources": []}],
+  "skipped": [{"exe": "foo.exe", "pid": 1235, "kind": "wine", "reason": "unknown: ...", "app_id": "", "sources": []}],
+  "notes": ["database download failed; using stale cache from 8d ago"]
+}
 ```
 
 Validate config, database, socket, and application-ID formats:
@@ -410,6 +429,7 @@ added, so add new settings manually when needed.
 
 | Setting                    | Default                         | Description                                      |
 | -------------------------- | ------------------------------- | ------------------------------------------------ |
+| `config_version`           | `1`                             | Config format version (migration hint if older)   |
 | `poll_seconds`             | `5`                             | How often to scan running processes (minimum 1)  |
 | `activity_refresh_seconds` | `60`                            | How often to refresh active activities            |
 | `refresh_unchanged_activities` | `true`                      | Resend identical activities as a liveness probe; when `false`, unchanged payloads are skipped and the connection is verified with a tiny IPC ping instead |
@@ -439,6 +459,8 @@ Copy [config.example.json](config.example.json) to
 and non-digit application IDs produce startup warnings; run
 `hydra-rpc --validate-config` to check. Editors can use
 [hydra-rpc.schema.json](hydra-rpc.schema.json) for autocompletion and validation.
+`config_version` tracks the config format: configs written before it existed log
+a one-time migration hint and missing keys simply use defaults.
 
 ### Activity customization
 
