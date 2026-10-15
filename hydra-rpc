@@ -35,6 +35,7 @@ DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
 UPDATE_SHA_URL = UPDATE_URL + ".sha256"
 CONFIG_VERSION = 1
+SCRIPT_VERSION = "1.0.0"
 UPDATE_TIMEOUT = 30
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
@@ -1393,7 +1394,7 @@ def build_status_report(cfg, index):
     return {
         "version": STATUS_REPORT_VERSION,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "script": {"path": installed_script_path()},
+        "script": {"path": installed_script_path(), "version": SCRIPT_VERSION},
         "config_version": cfg.get("config_version", CONFIG_VERSION),
         "db": {
             "url": cfg.get("db_url", DB_URL),
