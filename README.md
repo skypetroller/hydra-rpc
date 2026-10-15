@@ -323,14 +323,21 @@ diagnostics go to stderr). Top-level shape (`version: 1`):
 {
   "version": 1,
   "timestamp": "2026-10-15T12:00:00Z",
-  "script": {"path": "/usr/local/bin/hydra-rpc"},
+  "script": {"path": "/usr/local/bin/hydra-rpc", "version": "1.0.0"},
   "config_version": 1,
   "db": {"url": "...", "cached_at": 1729000000, "cached_age_seconds": 3600, "entries": 10216},
   "socket": {"found": true, "path": "/run/user/1000/discord-ipc-0", "attempts_tried": ["..."], "last_error": ""},
-  "detected": [{"exe": "Game.exe", "app_id": "123", "game_name": "Game", "pid": 1234, "kind": "wine", "matched_by": "database|override|emulator", "sources": []}],
+  "detected": [{"exe": "Game.exe", "app_id": "123", "game_name": "Game", "display_name": "Game", "pid": 1234, "kind": "wine", "matched_by": "database|override|emulator", "sources": []}],
   "skipped": [{"exe": "foo.exe", "pid": 1235, "kind": "wine", "reason": "unknown: ...", "app_id": "", "sources": []}],
   "notes": ["database download failed; using stale cache from 8d ago"]
 }
+```
+
+Field names are contractual: `scripts/check_status_contract.py` (run in CI and via
+`make status-contract`) asserts the exact top-level and per-entry key sets, so
+renames or removals fail loudly. Additive fields are allowed but should be
+announced in the changelog. `version: 1` marks the shape; bump it only with a
+breaking change.
 ```
 
 Validate config, database, socket, and application-ID formats:
