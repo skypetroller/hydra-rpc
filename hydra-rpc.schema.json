@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hydra-rpc config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "poll_seconds": {"type": "number", "minimum": 1, "default": 5},
+    "activity_refresh_seconds": {"type": "number", "minimum": 1, "default": 60},
+    "refresh_unchanged_activities": {"type": "boolean", "default": true},
+    "db_url": {"type": "string", "format": "uri", "default": "https://discord.com/api/v9/applications/detectable"},
+    "db_ttl_seconds": {"type": "number", "minimum": 0, "default": 604800},
+    "socket_dir": {"type": "string", "default": ""},
+    "socket_path": {"type": "string", "default": ""},
+    "max_socket_attempts": {"type": "integer", "minimum": 1, "maximum": 10, "default": 3},
+    "max_activities": {"type": "integer", "minimum": 0, "maximum": 10, "default": 0},
+    "hydra_only": {"type": "boolean", "default": false},
+    "hydra_markers": {"type": "array", "items": {"type": "string"}, "default": ["hydralauncher", "/opt/hydra/"]},
+    "emulators_enabled": {"type": "boolean", "default": false},
+    "emulator_application_ids": {
+      "type": "object",
+      "properties": {
+        "retroarch": {"type": "string"},
+        "pcsx2": {"type": "string"},
+        "duckstation": {"type": "string"},
+        "rpcs3": {"type": "string"},
+        "dolphin": {"type": "string"},
+        "ppsspp": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "emulator_overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[0-9]+$"},
+          "name": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "blocklist": {"type": "array", "items": {"type": "string"}},
+    "blocklist_ids": {"type": "array", "items": {"type": "string"}},
+    "blocklist_names": {"type": "array", "items": {"type": "string"}},
+    "activity_template": {"type": "string", "minLength": 1, "default": "{game_name}"},
+    "emulator_activity_template": {"type": "string", "minLength": 1, "default": "{emulator_name}"},
+    "rich_activity": {"type": "object"},
+    "log_file": {"type": "string", "default": ""},
+    "log_level": {"type": "string", "enum": ["debug", "info", "warning", "error"], "default": "info"},
+    "overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[0-9]+$"},
+          "name": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

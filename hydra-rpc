@@ -106,6 +106,7 @@ for _profile, _settings in EMULATOR_PROFILES.items():
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
 CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
 LOG_FILE_HANDLE = None
+LOG_TO_STDERR = False
 
 # Discords IPC framing: [type:int32][length:int32][json bytes]
 IPC_HANDSHAKE = 0
@@ -172,7 +173,9 @@ def log(msg, level="info"):
     if LOG_LEVELS.get(level, LOG_LEVELS["info"]) < CURRENT_LOG_LEVEL:
         return
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
-    print(line, flush=True)
+    # --status --json keeps stdout as pure JSON; diagnostics go to stderr there.
+    output = sys.stderr if LOG_TO_STDERR else sys.stdout
+    print(line, flush=True, file=output)
     if LOG_FILE_HANDLE is not None:
         try:
             LOG_FILE_HANDLE.write(line + "\n")
@@ -208,15 +211,30 @@ def close_logging():
         LOG_FILE_HANDLE = None
 
 
+def is_valid_app_id(value):
+    # Discord application IDs are numeric snowflakes. Empty means "unconfigured"
+    # (allowed for emulator_application_ids); anything non-empty must be digits.
+    if isinstance(value, int):
+        return value >= 0
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text == "" or text.isdigit()
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
+    user_keys = set()
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r") as f:
                 user = json.load(f)
             if not isinstance(user, dict):
                 raise ValueError("top-level config must be an object")
-            cfg.update(user)
+            user_keys = set(user)
+            for key in sorted(user_keys - set(DEFAULT_CONFIG)):
+                log(f"unknown config key '{key}'; ignoring it", "warning")
+            cfg.update({k: v for k, v in user.items() if k in DEFAULT_CONFIG})
         except Exception as e:
             log(f"could not read config ({e}); using defaults", "warning")
 
@@ -272,7 +290,14 @@ def load_config():
         for emulator in emulator_ids:
             value = raw_emulator_ids.get(emulator, emulator_ids[emulator])
             if isinstance(value, (str, int)):
-                emulator_ids[emulator] = str(value).strip()
+                text = str(value).strip()
+                emulator_ids[emulator] = text
+                if text and not text.isdigit():
+                    log(
+                        f"invalid application ID for {emulator} ('{text}'); "
+                        "Discord application IDs are all-digit snowflakes",
+                        "warning",
+                    )
             else:
                 log(f"invalid application ID for {emulator}; using the default", "warning")
     else:
@@ -316,6 +341,13 @@ def load_config():
         cfg[key] = {x.casefold() for x in values} if casefold else values
 
     normalise_string_set("blocklist_ids")
+    for blocked_id in sorted(cfg["blocklist_ids"]):
+        if not blocked_id.isdigit():
+            log(
+                f"invalid blocklist_ids entry '{blocked_id}'; "
+                "Discord application IDs are all-digit snowflakes",
+                "warning",
+            )
     normalise_string_set("blocklist_names", casefold=True)
     normalise_string_set("hydra_markers", casefold=True)
     if not cfg["hydra_markers"]:
@@ -342,6 +374,13 @@ def load_config():
         if not app_id or not name:
             log(f"ignoring incomplete override for '{exe}'", "warning")
             continue
+        app_text = str(app_id).strip()
+        if not app_text.isdigit():
+            log(
+                f"invalid application ID in override for '{exe}' ('{app_text}'); "
+                "Discord application IDs are all-digit snowflakes",
+                "warning",
+            )
         overrides[exe.lower()] = (str(app_id), str(name))
     cfg["overrides"] = overrides
 
@@ -359,8 +398,25 @@ def load_config():
         if not app_id or not name:
             log(f"ignoring incomplete emulator override for '{key}'", "warning")
             continue
+        app_text = str(app_id).strip()
+        if not app_text.isdigit():
+            log(
+                f"invalid application ID in emulator override for '{key}' "
+                f"('{app_text}'); Discord application IDs are all-digit snowflakes",
+                "warning",
+            )
         emulator_overrides[key.casefold()] = {"id": str(app_id), "name": str(name)}
     cfg["emulator_overrides"] = emulator_overrides
+    socket_path = cfg.get("socket_path", "")
+    if isinstance(socket_path, str) and socket_path.strip():
+        expanded = os.path.expanduser(os.path.expandvars(socket_path.strip()))
+        if not os.path.exists(expanded):
+            log(
+                f"configured socket_path '{socket_path}' does not exist "
+                f"(expanded: '{expanded}'); automatic socket discovery is disabled "
+                "while socket_path is set",
+                "warning",
+            )
     return cfg
 
 
@@ -933,6 +989,12 @@ def parse_args(argv=None):
         help="detect and log games without sending Discord activity",
     )
     modes.add_argument(
+        "--status",
+        action="store_true",
+        help="one-shot diagnostic: list detected processes and why each "
+        "was or was not matched (no Discord traffic)",
+    )
+    modes.add_argument(
         "--validate-config",
         action="store_true",
         help="validate settings, load the game database, and check arRPC",
@@ -947,32 +1009,205 @@ def parse_args(argv=None):
         action="store_true",
         help="download and atomically install the latest GitHub script",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --status: emit machine-readable JSON instead of a table",
+    )
     return parser.parse_args(argv)
 
 
 def validate_config(cfg, index):
+    ok = True
+    if not index:
+        log("warning: game database is empty; games will need overrides", "warning")
+    for emulator in sorted(cfg.get("emulator_application_ids", {})):
+        app_id = cfg["emulator_application_ids"][emulator]
+        if cfg.get("emulators_enabled") and not app_id:
+            log(
+                f"emulator '{emulator}' has no Discord application ID; it will be "
+                f"skipped until emulator_application_ids.{emulator} is set "
+                "(see https://discord.com/developers/applications)",
+                "warning",
+            )
+        elif app_id and not is_valid_app_id(app_id):
+            log(
+                f"invalid application ID for emulator '{emulator}' ('{app_id}')",
+                "warning",
+            )
+            ok = False
+    for exe, (app_id, _name) in sorted(cfg.get("overrides", {}).items()):
+        if not is_valid_app_id(app_id) or not str(app_id).strip().isdigit():
+            log(f"invalid application ID in override for '{exe}' ('{app_id}')", "warning")
+            ok = False
+    socket_path = str(cfg.get("socket_path", "") or "")
+    if socket_path:
+        expanded = os.path.expanduser(os.path.expandvars(socket_path))
+        if not os.path.exists(expanded):
+            log(f"configured socket_path does not exist: {expanded}", "warning")
+            ok = False
     base = runtime_dir(cfg) + "/discord-ipc"
     client = RPCClient(
         base,
         cfg.get("socket_path", ""),
         cfg["max_socket_attempts"],
     )
+    socket_ok = False
     for path in client.candidate_paths():
         client.path = path
         try:
             probe = client._connect()
             probe.close()
-            log(f"config valid; loaded {len(index)} executable mappings")
-            log(f"arRPC socket ready: {path}")
-            return True
+            socket_ok = True
+            socket_path_found = path
+            break
         except OSError:
             continue
-    log(
-        f"config valid; loaded {len(index)} executable mappings, "
-        "but no arRPC socket was found",
-        "warning",
+    if socket_ok:
+        log(f"config valid; loaded {len(index)} executable mappings")
+        log(f"arRPC socket ready: {socket_path_found}")
+    else:
+        log(
+            f"config valid; loaded {len(index)} executable mappings, "
+            "but no arRPC socket was found",
+            "warning",
+        )
+        return False
+    return ok
+
+
+def describe_unmatched(exe, info, overrides, index, cfg):
+    """Return (reason, app_id) explaining why a scanned process was not reported."""
+    sources = info.get("sources", set()) if isinstance(info, dict) else set()
+    if isinstance(info, dict) and info.get("kind") == "emulator":
+        app_id = emulator_application_id(exe, info, cfg) or ""
+        if not app_id:
+            return ("missing-emulator-app-id: set emulator_application_ids."
+                    + info["emulator"], "")
+        if app_id in cfg["blocklist_ids"]:
+            return ("blocklisted-app-id", app_id)
+        if info["rom_name"].casefold() in cfg["blocklist_names"]:
+            return ("blocklisted-name", app_id)
+        if cfg["hydra_only"] and "hydra" not in sources:
+            return ("hydra-filtered: no Hydra marker", app_id)
+        return ("unknown", app_id)
+    app = overrides.get(exe) or index.get(exe)
+    if not app:
+        return ("unknown: not in database (add an override)", "")
+    app_id, game_name = app
+    if app_id in cfg["blocklist_ids"]:
+        return ("blocklisted-app-id", app_id)
+    if game_name.casefold() in cfg["blocklist_names"]:
+        return ("blocklisted-name", app_id)
+    if cfg["hydra_only"] and "hydra" not in sources:
+        return ("hydra-filtered: no Hydra marker", app_id)
+    return ("unknown", app_id)
+
+
+def collect_status(cfg, index, include_exe_blocklisted=True):
+    """One-shot snapshot of what the watcher sees and why each entry matches."""
+    exes = scan_processes(
+        cfg["blocklist"],
+        cfg["hydra_markers"],
+        cfg["emulators_enabled"],
+        cfg["hydra_only"],
     )
-    return False
+    exe_blocklisted = {}
+    if include_exe_blocklisted:
+        try:
+            unfiltered = scan_processes(
+                set(),
+                cfg["hydra_markers"],
+                cfg["emulators_enabled"],
+                cfg["hydra_only"],
+            )
+            for exe, info in unfiltered.items():
+                if exe not in exes and exe.lower() in cfg["blocklist"]:
+                    exe_blocklisted[exe] = info
+        except Exception:
+            exe_blocklisted = {}
+    entries = []
+    for exe in sorted(set(exes) | set(exe_blocklisted)):
+        if exe in exe_blocklisted:
+            info = exe_blocklisted[exe]
+            entries.append({
+                "exe": exe,
+                "pid": info.get("pid") if isinstance(info, dict) else info,
+                "path": info.get("path", "") if isinstance(info, dict) else "",
+                "kind": "emulator" if isinstance(info, dict) and info.get("kind") == "emulator" else "wine",
+                "matched": False,
+                "reason": "blocklisted-exe",
+                "app_id": "",
+                "display_name": "",
+                "sources": sorted(info.get("sources", set())) if isinstance(info, dict) else [],
+            })
+            continue
+        info = exes[exe]
+        game = resolve_game(exe, info, cfg["overrides"], index, cfg)
+        if game is not None:
+            entries.append({
+                "exe": exe,
+                "pid": game["pid"],
+                "path": info.get("path", "") if isinstance(info, dict) else "",
+                "kind": game.get("kind", "wine"),
+                "matched": True,
+                "reason": "matched",
+                "app_id": game["app_id"],
+                "display_name": game["display_name"],
+                "sources": sorted(info.get("sources", set())) if isinstance(info, dict) else [],
+            })
+        else:
+            reason, app_id = describe_unmatched(exe, info, cfg["overrides"], index, cfg)
+            kind = "emulator" if isinstance(info, dict) and info.get("kind") == "emulator" else "wine"
+            display = ""
+            if kind == "emulator" and isinstance(info, dict):
+                display = f"{DEFAULT_EMULATOR_NAMES.get(info.get('emulator'), info.get('emulator', ''))}: {info.get('rom_name', '')}"
+            entries.append({
+                "exe": exe,
+                "pid": info.get("pid") if isinstance(info, dict) else info,
+                "path": info.get("path", "") if isinstance(info, dict) else "",
+                "kind": kind,
+                "matched": False,
+                "reason": reason,
+                "app_id": app_id,
+                "display_name": display,
+                "sources": sorted(info.get("sources", set())) if isinstance(info, dict) else [],
+            })
+    return entries
+
+
+def format_status_table(entries):
+    if not entries:
+        return "status: no wine .exe or emulator ROM processes detected"
+    lines = []
+    header = f"{'EXE':<32} {'PID':>6}  {'MATCH':<7} REASON"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for entry in entries:
+        exe = entry["exe"]
+        if len(exe) > 32:
+            exe = exe[:29] + "..."
+        match = "yes" if entry["matched"] else "no"
+        extra = ""
+        if entry["matched"]:
+            extra = f" app_id={entry['app_id']} '{entry['display_name']}'"
+        elif entry["app_id"]:
+            extra = f" app_id={entry['app_id']}"
+        if entry["sources"]:
+            extra += f" sources={','.join(entry['sources'])}"
+        lines.append(f"{exe:<32} {entry['pid']:>6}  {match:<7} {entry['reason']}{extra}")
+    matched = sum(1 for e in entries if e["matched"])
+    lines.append(f"status: {matched}/{len(entries)} matched")
+    return "\n".join(lines)
+
+
+def print_status(cfg, index, as_json=False):
+    entries = collect_status(cfg, index)
+    if as_json:
+        print(json.dumps(entries, indent=2, sort_keys=True))
+    else:
+        print(format_status_table(entries))
+    return entries
 
 
 def close_state(state):
@@ -1216,6 +1451,9 @@ def main(argv=None):
         return update_script()
     if args.update:
         return update_script(install=True)
+    global LOG_TO_STDERR
+    if getattr(args, "json", False) and getattr(args, "status", False):
+        LOG_TO_STDERR = True
     cfg = load_config()
     configure_logging(cfg)
     ensure_config(cfg)
@@ -1228,6 +1466,16 @@ def main(argv=None):
         valid = validate_config(cfg, index)
         close_logging()
         return 0 if valid else 1
+
+    if args.json and not args.status:
+        print("--json requires --status", file=sys.stderr)
+        close_logging()
+        return 2
+
+    if args.status:
+        print_status(cfg, index, as_json=args.json)
+        close_logging()
+        return 0
 
     sessions = load_sessions()
     base = runtime_dir(cfg) + "/discord-ipc"
@@ -1302,12 +1550,26 @@ def main(argv=None):
                 if signature != dry_signature:
                     if games:
                         for game in games:
+                            sources = ""
+                            info = exes.get(game["exe"], {})
+                            if isinstance(info, dict) and info.get("sources"):
+                                sources = f" sources={','.join(sorted(info['sources']))}"
                             log(
                                 f"dry-run: detected game: {game['display_name']} "
-                                f"({game['exe']}) (would report)"
+                                f"({game['exe']}) pid={game['pid']} "
+                                f"app_id={game['app_id']}{sources} (would report)"
                             )
                     else:
                         log("dry-run: no supported games detected")
+                        if exes:
+                            # Log one line per unmatched process so users see why
+                            # nothing matched instead of only "no supported games".
+                            for exe in sorted(exes):
+                                reason, app_id = describe_unmatched(
+                                    exe, exes[exe], cfg["overrides"], index, cfg
+                                )
+                                suffix = f" app_id={app_id}" if app_id else ""
+                                log(f"dry-run: skipped '{exe}': {reason}{suffix}")
                     dry_signature = signature
                 next_scan = scan_start + cfg["poll_seconds"]
                 continue

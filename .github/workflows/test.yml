@@ -21,6 +21,10 @@ jobs:
         run: python -m unittest discover --start-directory tests --verbose
       - name: Validate Python syntax
         run: python -B -c "import ast; ast.parse(open('hydra-rpc').read())"
+      - name: Validate JSON (schema + example)
+        run: python -c "import json; json.load(open('hydra-rpc.schema.json')); json.load(open('config.example.json')); print('JSON OK')"
+      - name: Check Makefile targets
+        run: make lint
       - name: Validate desktop entry
         run: |
           sudo apt-get update

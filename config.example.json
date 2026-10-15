@@ -1,0 +1,50 @@
+{
+  "poll_seconds": 5,
+  "activity_refresh_seconds": 60,
+  "refresh_unchanged_activities": true,
+  "db_url": "https://discord.com/api/v9/applications/detectable",
+  "db_ttl_seconds": 604800,
+  "socket_dir": "",
+  "socket_path": "",
+  "max_socket_attempts": 3,
+  "max_activities": 0,
+  "hydra_only": false,
+  "hydra_markers": ["hydralauncher", "/opt/hydra/"],
+  "emulators_enabled": false,
+  "emulator_application_ids": {
+    "retroarch": "505497615748694018",
+    "pcsx2": "505494914872770583",
+    "duckstation": "",
+    "rpcs3": "",
+    "dolphin": "356943187589201930",
+    "ppsspp": ""
+  },
+  "emulator_overrides": {
+    "retroarch:super mario world": {
+      "id": "123456789012345678",
+      "name": "Super Mario World"
+    }
+  },
+  "blocklist": [
+    "wineserver",
+    "services.exe",
+    "explorer.exe",
+    "umu.exe"
+  ],
+  "blocklist_ids": [],
+  "blocklist_names": [],
+  "activity_template": "{game_name}",
+  "emulator_activity_template": "{emulator_name}",
+  "rich_activity": {
+    "details": "Playing {game_name}",
+    "state": "Executable: {exe}"
+  },
+  "log_file": "",
+  "log_level": "info",
+  "overrides": {
+    "somegame.exe": {
+      "id": "123456789012345678",
+      "name": "Some Game"
+    }
+  }
+}

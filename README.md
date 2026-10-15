@@ -1,7 +1,13 @@
 # hydra-rpc
 
+[![Tests](https://github.com/skypetroller/hydra-rpc/actions/workflows/test.yml/badge.svg)](https://github.com/skypetroller/hydra-rpc/actions/workflows/test.yml)
+
 Show `Playing <Game>` in Discord for Windows games running on Linux through Hydra,
 Proton, Wine, or another compatible launcher.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and
+[config.example.json](config.example.json) for a fully commented-by-example config.
+`hydra-rpc.schema.json` provides JSON Schema validation for `config.json`.
 
 ## Features
 
@@ -16,7 +22,8 @@ Proton, Wine, or another compatible launcher.
 - Supports custom activity names and optional Discord fields such as `details`, `state`,
   `assets`, and `buttons`.
 - Supports blocklists by executable, Discord application ID, or game name.
-- Includes `--dry-run` and `--validate-config` troubleshooting commands.
+- Includes `--dry-run`, `--status` / `--status --json`, and `--validate-config`
+  troubleshooting commands (detection table with match reasons, no Discord traffic).
 - Includes explicit `--check-update` and `--update` commands.
 - Supports optional file logging and automatic arRPC socket recovery.
 - Includes an optional Hydra-marker mode that can reduce conflicts with other launchers' RPC.
@@ -64,24 +71,53 @@ arRPC. It has its own process detection, which commonly misses Wine/Proton games
 
 ### 1. Install
 
+Copy-paste defaults (paths used below):
+
+```text
+script:  /usr/local/bin/hydra-rpc   (system) or ~/.local/bin/hydra-rpc (user)
+config:  ~/.config/hydra-rpc/config.json
+cache:   ~/.cache/hydra-rpc/detectable.json
+service: ~/.config/systemd/user/hydra-rpc.service
+```
+
 The easiest installation uses `/usr/local/bin`, which matches the included startup files:
 
 ```sh
 git clone https://github.com/skypetroller/hydra-rpc.git
 cd hydra-rpc
-sudo install -Dm755 hydra-rpc /usr/local/bin/hydra-rpc
+sudo make install
+# or without make:
+# sudo install -Dm755 hydra-rpc /usr/local/bin/hydra-rpc
 ```
 
 If you do not want to use `sudo`, install it in your home directory instead:
 
 ```sh
-mkdir -p ~/.local/bin
-install -Dm755 hydra-rpc ~/.local/bin/hydra-rpc
+make install-user
+# or without make:
+# mkdir -p ~/.local/bin
+# install -Dm755 hydra-rpc ~/.local/bin/hydra-rpc
 ```
 
 The included `.desktop` and systemd files assume `/usr/local/bin/hydra-rpc`. If you use
 `~/.local/bin`, change their `Exec=` or `ExecStart=` line to
 `/home/your-user/.local/bin/hydra-rpc`.
+
+#### Distro notes
+
+- **Ubuntu / Debian / Mint / Pop!_OS**: `sudo apt install python3 git`; no extra
+  Python packages needed. Use `sudo make install`, then the systemd user service.
+- **Fedora / Nobara / Bazzite**: `sudo dnf install python3 git`; SELinux does not
+  block `/proc` scanning. Same `sudo make install` path works.
+- **Arch / CachyOS / EndeavourOS / Manjaro**: `sudo pacman -S python git`; use
+  `sudo make install`. Keep `~/.local/bin` on `PATH` if you use `make install-user`.
+- **NixOS / Home Manager**: the script is dependency-free Python, so wrap it as a
+  package or run it from `~/.local/bin` via `make install-user`; point
+  `ExecStart=` at your Nix store path or `~/.local/bin/hydra-rpc`.
+- **Flatpak Discord / Vesktop**: the watcher itself runs on the host (not in the
+  Flatpak). The Discord *client* sandbox must be able to see the arRPC socket —
+  see "Known issues: Flatpak" below. Prefer a native/host Discord client when
+  possible.
 
 ### 2. Check the connection
 
@@ -263,11 +299,63 @@ explicit and does not update silently at startup.
 
 ## Troubleshooting
 
-Preview detection without sending anything to Discord:
+Preview detection without sending anything to Discord (`--dry-run` now shows
+PID, application ID, Hydra sources, and skip reasons):
 
 ```sh
 hydra-rpc --dry-run
 ```
+
+One-shot status table — which processes were seen and why each was or was not
+matched (no Discord traffic). Ideal for bug reports:
+
+```sh
+hydra-rpc --status
+hydra-rpc --status --json > status.json
+```
+
+Validate config, database, socket, and application-ID formats:
+
+```sh
+hydra-rpc --validate-config
+```
+
+### How to debug a missing game
+
+```text
+1. Is the game running?
+     no  -> launch it, then re-run hydra-rpc --status
+     yes -> 2. Is its .exe visible in /proc?
+2. grep -a -o -E '[^ ]+\.exe' /proc/*/cmdline | sort -u
+     no  -> wrapper/sandbox hides the command line (Proton/UMU quirk,
+            isolated PID namespace); try the launcher's native mode or an override
+            with the visible exe name
+     yes -> 3. Is it in Discord's detectable database?
+3. hydra-rpc --status  (look for "unknown: not in database")
+     no  -> add an "overrides" entry with the exe + Discord application ID
+     yes -> 4. Is arRPC connected?
+4. hydra-rpc --validate-config; ls -l "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/discord-ipc-*
+     no socket -> start arRPC / enable WebRichPresence (arRPC) in Vesktop,
+                  check Flatpak overrides and multiple-server conflicts below
+     socket ok but still missing -> check blocklists, hydra_only filtering,
+                  and emulator app IDs in --status reasons
+```
+
+### Launcher examples
+
+- **Hydra**: launch the game from Hydra, run `hydra-rpc --status`, confirm the
+  `.exe` row says `matched` (or `hydra-filtered` if `hydra_only` is on without a
+  marker). Default `hydra_only: false` reports Hydra games like any other launcher.
+- **Heroic (Wine/Proton)**: launch via Heroic, check `--status` for
+  `Game.exe matched`. UMU-based runs may show long `umu` wrapper lines — the
+  underlying `.exe` is still detected.
+- **Lutris / Bottles**: same flow; if two launchers wrap the same exe, generic mode
+  reports it once. Use `hydra_only: true` only to suppress non-Hydra duplicates.
+- **Steam (Proton)**: Steam games appear as `Game.exe` under `steamapps/common`;
+  `--status` confirms the mapping. No Steam-specific config needed.
+- **RetroArch (emulator)**: enable `emulators_enabled: true`, load a ROM, check
+  `--status` for `emulator:retroarch:<rom> matched`. Idle emulator menus (no ROM)
+  are intentionally not reported.
 
 Check the watcher service and its logs:
 
@@ -325,27 +413,32 @@ added, so add new settings manually when needed.
 | `poll_seconds`             | `5`                             | How often to scan running processes (minimum 1)  |
 | `activity_refresh_seconds` | `60`                            | How often to refresh active activities            |
 | `refresh_unchanged_activities` | `true`                      | Resend identical activities as a liveness probe; when `false`, unchanged payloads are skipped and the connection is verified with a tiny IPC ping instead |
-| `refresh_unchanged_activities` | `true`                      | Resend identical activities as a liveness probe; when `false`, byte-identical refreshes are skipped |
 | `max_activities`           | `0` (all)                       | Use `1`-`10` to limit reported games              |
 | `db_url`                   | Discord endpoint                | Source of the executable database                 |
 | `db_ttl_seconds`           | `604800` (7 days)               | How long the database cache stays fresh           |
 | `socket_dir`               | `$XDG_RUNTIME_DIR`              | Directory used for automatic socket discovery     |
-| `socket_path`              | Automatic                       | Exact arRPC socket path                           |
+| `socket_path`              | Automatic                       | Exact arRPC socket path (warns if missing)        |
 | `max_socket_attempts`      | `3`                             | Maximum automatic socket paths tried (1-10)       |
 | `hydra_only`               | `false`                         | Enable best-effort Hydra-marker filtering        |
 | `hydra_markers`            | Hydra path markers              | Markers used by Hydra-marker mode                |
 | `emulators_enabled`        | `false`                         | Detect 6 supported emulators                    |
-| `emulator_application_ids` | RetroArch/PCSX2/Dolphin preset | Per-emulator Discord application IDs             |
+| `emulator_application_ids` | RetroArch/PCSX2/Dolphin preset | Per-emulator Discord application IDs (all-digit; empty = unconfigured) |
 | `emulator_activity_template` | `"{emulator_name}"`           | Template for the emulator activity name          |
 | `emulator_overrides`       | `{}`                            | Per-emulator or per-ROM application mappings     |
 | `blocklist`                | Wine service processes          | Executable names never reported                   |
-| `blocklist_ids`            | `[]`                            | Discord application IDs never reported            |
+| `blocklist_ids`            | `[]`                            | Discord application IDs never reported (all-digit) |
 | `blocklist_names`          | `[]`                            | Case-insensitive game names never reported        |
 | `activity_template`        | `"{game_name}"`                | Template for the activity name                   |
 | `rich_activity`             | `{}`                            | Additional Discord activity fields               |
 | `log_file`                 | `""`                            | Optional log file                                |
 | `log_level`                | `"info"`                        | `debug`, `info`, `warning`, or `error`            |
-| `overrides`                | `{}`                            | Manual executable-to-application mappings         |
+| `overrides`                | `{}`                            | Manual executable-to-application mappings (all-digit IDs) |
+
+Copy [config.example.json](config.example.json) to
+`~/.config/hydra-rpc/config.json` as a starting point. Unknown top-level keys
+and non-digit application IDs produce startup warnings; run
+`hydra-rpc --validate-config` to check. Editors can use
+[hydra-rpc.schema.json](hydra-rpc.schema.json) for autocompletion and validation.
 
 ### Activity customization
 
@@ -406,12 +499,37 @@ For a game missing from Discord's database, add a manual mapping:
 - Hydra-marker mode can miss games or match another launcher if its process information
   contains the same configured marker.
 
+### Known issues
+
+- **Flatpak Discord / Vesktop**: the sandbox hides `xdg-run/discord-ipc-*` by
+  default, so the host watcher finds no socket. Allowlist it, e.g.
+  `flatpak override --user --filesystem=xdg-run/discord-ipc-0 <app-id>`, then
+  re-run `hydra-rpc --validate-config`. Prefer host-native clients when possible.
+- **Multiple arRPC instances**: two servers (e.g. Vesktop + standalone arRPC, or
+  two Discord clients) create `discord-ipc-0`, `discord-ipc-1`, ... The watcher
+  tries the first `max_socket_attempts` in order; activity may appear in only one
+  client. Pin `socket_path` to the client you actually use.
+- **Proton / UMU path quirks**: UMU/Proton wrappers expose long `umu-run` or
+  `pressure-vessel` command lines; detection still works as long as the trailing
+  `Game.exe` is visible. If your launcher isolates the PID namespace or rewrites
+  argv, `--status` shows no row — use native launcher mode or check for a wrapper
+  update.
+- **Hydra-marker false positives/negatives**: markers are substring matches on
+  cmdline + environment. A generic marker like `gameid=umu-` matches other
+  launchers; a too-specific marker misses Hydra moved to another path. Keep the
+  defaults plus one install-unique path, and verify with `--status` (`sources`
+  column shows `hydra` when a marker hit).
+
 ## Development
 
 Run the dependency-free test suite:
 
 ```sh
 python3 -m unittest discover --start-directory tests --verbose
+# or:
+make test
+make lint   # syntax + JSON schema/example validation
+make check  # test + lint
 ```
 
 Tests run automatically for pushes and pull requests through GitHub Actions.

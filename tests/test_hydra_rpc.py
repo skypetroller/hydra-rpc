@@ -926,6 +926,202 @@ class HydraRpcTests(unittest.TestCase):
 
         self.assertEqual(set(found), {"game.exe"})
 
+    def test_is_valid_app_id(self):
+        is_valid = NAMESPACE["is_valid_app_id"]
+        self.assertTrue(is_valid(""))
+        self.assertTrue(is_valid("123456789012345678"))
+        self.assertTrue(is_valid(123))
+        self.assertFalse(is_valid("abc"))
+        self.assertFalse(is_valid("123abc"))
+        self.assertFalse(is_valid(None))
+
+    def test_unknown_config_keys_are_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"unknown_key_xyz": 1, "poll_seconds": 5}))
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                config = NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+        self.assertEqual(config["poll_seconds"], 5)
+        self.assertNotIn("unknown_key_xyz", config)
+
+    def test_invalid_app_ids_warn_but_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({
+                "emulator_application_ids": {"retroarch": "not-digits"},
+                "overrides": {"bad.exe": {"id": "nope", "name": "Bad"}},
+                "blocklist_ids": ["xyz"],
+            }))
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                config = NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+        self.assertEqual(config["emulator_application_ids"]["retroarch"], "not-digits")
+        self.assertIn("bad.exe", config["overrides"])
+        self.assertIn("xyz", config["blocklist_ids"])
+
+    def test_missing_socket_path_warns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"socket_path": "/nonexistent/discord-ipc-0"}))
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                config = NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+        self.assertEqual(config["socket_path"], "/nonexistent/discord-ipc-0")
+
+    def test_cli_status_and_json_parse(self):
+        parse_args = NAMESPACE["parse_args"]
+        args = parse_args(["--status"])
+        self.assertTrue(args.status)
+        self.assertFalse(args.json)
+        args = parse_args(["--status", "--json"])
+        self.assertTrue(args.status)
+        self.assertTrue(args.json)
+
+    def test_describe_unmatched_reasons(self):
+        describe = NAMESPACE["describe_unmatched"]
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["hydra_only"] = False
+        cfg["emulator_application_ids"] = dict(NAMESPACE["DEFAULT_EMULATOR_APPLICATION_IDS"])
+        cfg["emulator_overrides"] = {}
+        # unknown exe
+        reason, app_id = describe("unknown.exe", {"pid": 1, "path": "x", "sources": set()}, {}, {}, cfg)
+        self.assertTrue(reason.startswith("unknown"))
+        self.assertEqual(app_id, "")
+        # blocklisted app id
+        cfg2 = dict(cfg, blocklist_ids={"123"})
+        reason, app_id = describe(
+            "example.exe", {"pid": 1, "path": "x", "sources": set()},
+            {}, {"example.exe": ("123", "Example")}, cfg2,
+        )
+        self.assertEqual(reason, "blocklisted-app-id")
+        # hydra filtered
+        cfg3 = dict(cfg, hydra_only=True)
+        reason, _ = describe(
+            "example.exe", {"pid": 1, "path": "x", "sources": set()},
+            {}, {"example.exe": ("123", "Example")}, cfg3,
+        )
+        self.assertTrue(reason.startswith("hydra-filtered"))
+        # missing emulator app id
+        info = {"kind": "emulator", "emulator": "ppsspp", "rom_name": "Game",
+                "rom_path": "/g.iso", "pid": 1, "sources": set()}
+        reason, _ = describe("emulator:ppsspp:/g.iso", info, {}, {}, cfg)
+        self.assertTrue(reason.startswith("missing-emulator-app-id"))
+
+    def test_collect_status_and_table(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0",
+                "environ": b"",
+            },
+            "101": {
+                "cmdline": b"/usr/bin/wine\0/unix\0/mnt/other/Other.exe\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist"] = set()
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["hydra_only"] = False
+        cfg["hydra_markers"] = set()
+        cfg["emulators_enabled"] = False
+        cfg["overrides"] = {}
+        cfg["emulator_overrides"] = {}
+        cfg["emulator_application_ids"] = dict(NAMESPACE["DEFAULT_EMULATOR_APPLICATION_IDS"])
+        cfg["activity_template"] = "{game_name}"
+        cfg["emulator_activity_template"] = "{emulator_name}"
+        cfg["rich_activity"] = {}
+        index = {"game.exe": ("123", "Game")}
+        with (
+            patch("os.listdir", return_value=["100", "101"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            entries = NAMESPACE["collect_status"](cfg, index)
+        by_exe = {e["exe"]: e for e in entries}
+        self.assertTrue(by_exe["game.exe"]["matched"])
+        self.assertEqual(by_exe["game.exe"]["app_id"], "123")
+        self.assertFalse(by_exe["other.exe"]["matched"])
+        self.assertIn("unknown", by_exe["other.exe"]["reason"])
+        table = NAMESPACE["format_status_table"](entries)
+        self.assertIn("game.exe", table)
+        self.assertIn("1/2 matched", table)
+        # JSON-serialisable
+        json.dumps(entries)
+        self.assertEqual(
+            NAMESPACE["format_status_table"]([]),
+            "status: no wine .exe or emulator ROM processes detected",
+        )
+
+    def test_collect_status_surfaces_exe_blocklist(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/wine\0/unix\0/mnt/game/Game.exe\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist"] = {"game.exe"}
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["hydra_only"] = False
+        cfg["hydra_markers"] = set()
+        cfg["emulators_enabled"] = False
+        cfg["overrides"] = {}
+        cfg["emulator_overrides"] = {}
+        cfg["emulator_application_ids"] = dict(NAMESPACE["DEFAULT_EMULATOR_APPLICATION_IDS"])
+        cfg["activity_template"] = "{game_name}"
+        cfg["emulator_activity_template"] = "{emulator_name}"
+        cfg["rich_activity"] = {}
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            entries = NAMESPACE["collect_status"](cfg, {"game.exe": ("123", "Game")})
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0]["matched"])
+        self.assertEqual(entries[0]["reason"], "blocklisted-exe")
+
+    def test_validate_config_rejects_bad_socket_and_ids(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["hydra_markers"] = set()
+        cfg["emulators_enabled"] = False
+        cfg["emulator_application_ids"] = dict(NAMESPACE["DEFAULT_EMULATOR_APPLICATION_IDS"])
+        cfg["overrides"] = {"bad.exe": ("not-digits", "Bad")}
+        cfg["socket_path"] = "/nonexistent/discord-ipc-0"
+        cfg["max_socket_attempts"] = 3
+        with patch.object(NAMESPACE["RPCClient"], "_connect", side_effect=OSError("no socket")):
+            self.assertFalse(NAMESPACE["validate_config"](cfg, {"a.exe": ("1", "A")}))
+
 
 if __name__ == "__main__":
     unittest.main()

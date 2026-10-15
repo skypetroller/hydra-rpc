@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to hydra-rpc are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## [Unreleased]
+
+### Added
+
+- `Makefile` with `install`, `install-user`, `uninstall`, `test`, `lint`, `check` targets.
+- `config.example.json` with every supported setting and realistic override examples.
+- `hydra-rpc.schema.json` (JSON Schema draft 2020-12) for editor validation of `config.json`.
+- `hydra-rpc --status` one-shot diagnostic: prints a terminal table of detected
+  processes and why each was or was not matched (matched / unknown / blocklisted /
+  hydra-filtered / missing emulator app ID). `--status --json` emits the same data
+  as machine-readable JSON for scripts and bug reports.
+- Richer `--dry-run` output: now shows PID, application ID, and Hydra-marker source
+  for each match instead of only exe + display name.
+- Stronger config validation:
+  - warns on unknown top-level config keys,
+  - warns on malformed Discord application IDs (expected all-digit snowflakes),
+  - warns when a configured `socket_path` does not exist,
+  - `--validate-config` reports missing emulator app IDs and per-override ID problems.
+- README: distro-specific install notes (Arch, Fedora, Ubuntu, Nix, Flatpak),
+  copy-paste default paths section, "Known issues" section, "How to debug
+  a missing game" flowchart, and launcher examples (Hydra, Heroic, Lutris,
+  Bottles, Steam).
+
+### Fixed
+
+- README config table: removed duplicated `refresh_unchanged_activities` row.
+
+## [Previous]
+
+- See `git log --oneline` for history before this changelog was introduced.
+- Notable existing behavior: multi-activity reporting, session-time preservation,
+  emulator support (RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, PPSSPP),
+  Hydra-marker mode, blocklists, templates, file logging, arRPC socket recovery,
+  `--dry-run`, `--validate-config`, `--check-update` / `--update`.
