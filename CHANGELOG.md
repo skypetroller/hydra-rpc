@@ -25,6 +25,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Edge-case tests: `test_status_json.py`, `test_config_migration.py`,
   `test_updater_socket.py` (checksum + socket discovery), `test_db_cache.py`
   (fresh/expired/offline cache, `max_activities`). 73 tests total.
+- `Makefile` with `install`, `install-user`, `uninstall`, `test`, `lint`, `check` targets.
+- `config.example.json` with every supported setting and realistic override examples.
+- `hydra-rpc.schema.json` (JSON Schema draft 2020-12) for editor validation of `config.json`.
+- `hydra-rpc --status` one-shot diagnostic: prints a terminal table of detected
+  processes and why each was or was not matched (matched / unknown / blocklisted /
+  hydra-filtered / missing emulator app ID). `--status --json` emits structured
+  versioned JSON for scripts and bug reports.
+- Richer `--dry-run` output: now shows PID, application ID, and Hydra-marker source
+  for each match instead of only exe + display name.
+- Stronger config validation:
+  - warns on unknown top-level config keys,
+  - warns on malformed Discord application IDs (expected all-digit snowflakes),
+  - warns when a configured `socket_path` does not exist,
+  - `--validate-config` reports missing emulator app IDs and per-override ID problems.
+- README: distro-specific install notes (Arch, Fedora, Ubuntu, Nix, Flatpak),
+  copy-paste default paths section, "Known issues" section, "How to debug
+  a missing game" flowchart, and launcher examples (Hydra, Heroic, Lutris,
+  Bottles, Steam).
 
 ### Changed
 
@@ -41,27 +59,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Tagging `vX.Y.Z` runs the release workflow (bundle check, tests, checksum,
   status contract) and publishes a GitHub Release with `hydra-rpc` +
   `hydra-rpc.sha256` assets.
-
-### Added
-
-- `Makefile` with `install`, `install-user`, `uninstall`, `test`, `lint`, `check` targets.
-- `config.example.json` with every supported setting and realistic override examples.
-- `hydra-rpc.schema.json` (JSON Schema draft 2020-12) for editor validation of `config.json`.
-- `hydra-rpc --status` one-shot diagnostic: prints a terminal table of detected
-  processes and why each was or was not matched (matched / unknown / blocklisted /
-  hydra-filtered / missing emulator app ID). `--status --json` emits the same data
-  as machine-readable JSON for scripts and bug reports.
-- Richer `--dry-run` output: now shows PID, application ID, and Hydra-marker source
-  for each match instead of only exe + display name.
-- Stronger config validation:
-  - warns on unknown top-level config keys,
-  - warns on malformed Discord application IDs (expected all-digit snowflakes),
-  - warns when a configured `socket_path` does not exist,
-  - `--validate-config` reports missing emulator app IDs and per-override ID problems.
-- README: distro-specific install notes (Arch, Fedora, Ubuntu, Nix, Flatpak),
-  copy-paste default paths section, "Known issues" section, "How to debug
-  a missing game" flowchart, and launcher examples (Hydra, Heroic, Lutris,
-  Bottles, Steam).
 
 ### Fixed
 
