@@ -338,7 +338,6 @@ Field names are contractual: `scripts/check_status_contract.py` (run in CI and v
 renames or removals fail loudly. Additive fields are allowed but should be
 announced in the changelog. `version: 1` marks the shape; bump it only with a
 breaking change.
-```
 
 Validate config, database, socket, and application-ID formats:
 
