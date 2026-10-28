@@ -1,4 +1,58 @@
 # hydra-rpc source module: main (bundled into ./hydra-rpc by build.py)
+_INSTANCE_LOCK_FD = None
+
+
+def release_instance_lock():
+    global _INSTANCE_LOCK_FD
+    if _INSTANCE_LOCK_FD is not None:
+        try:
+            os.close(_INSTANCE_LOCK_FD)
+        except OSError:
+            pass
+        _INSTANCE_LOCK_FD = None
+
+
+def game_restarted(state, game, current_tick):
+    """True when the same executable now belongs to a different process."""
+    if state is None:
+        return False
+    return state.get("pid") != game["pid"] or (
+        current_tick is not None and state.get("start_tick") != current_tick
+    )
+
+
+def acquire_instance_lock(path=None):
+    """Take the watcher's single-instance lock; False if another owns it."""
+    global _INSTANCE_LOCK_FD
+    path = path or LOCK_PATH
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        # An unwritable cache dir should not stop presence reporting.
+        log(f"could not open instance lock '{path}': {e}", "warning")
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = ""
+        try:
+            holder = os.pread(fd, 32, 0).decode("ascii", "ignore").strip()
+        except OSError:
+            pass
+        os.close(fd)
+        suffix = f" (pid {holder})" if holder else ""
+        log(f"another hydra-rpc instance is already running{suffix}; exiting")
+        return False
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+    except OSError:
+        pass
+    _INSTANCE_LOCK_FD = fd
+    return True
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.check_update:
@@ -11,6 +65,19 @@ def main(argv=None):
     cfg = load_config()
     configure_logging(cfg)
     ensure_config(cfg)
+
+    if args.json and not args.status:
+        print("--json requires --status", file=sys.stderr)
+        close_logging()
+        return 2
+
+    # Only the real watcher is exclusive; diagnostics and --dry-run must remain
+    # usable while it is running.
+    if not (args.validate_config or args.status or args.dry_run):
+        if not acquire_instance_lock():
+            close_logging()
+            return 0
+
     index = load_db(cfg)
     if not index:
         log("no detectable database available; games will need overrides", "error")
@@ -20,11 +87,6 @@ def main(argv=None):
         valid = validate_config(cfg, index)
         close_logging()
         return 0 if valid else 1
-
-    if args.json and not args.status:
-        print("--json requires --status", file=sys.stderr)
-        close_logging()
-        return 2
 
     if args.status:
         print_status(cfg, index, as_json=args.json)
@@ -43,6 +105,7 @@ def main(argv=None):
         for state in states.values():
             close_state(state)
         save_sessions(sessions)
+        release_instance_lock()
         close_logging()
         sys.exit(0)
 
@@ -141,19 +204,31 @@ def main(argv=None):
                         sessions_dirty = True
 
             for exe, game in selected.items():
+                current_tick = get_process_start_tick(game["pid"])
                 state = states.get(exe)
+                if game_restarted(state, game, current_tick):
+                    # The same executable relaunched between polls: do not keep
+                    # the old session's elapsed time or presence payload.
+                    log(
+                        f"game restarted: {state['display_name']} ({exe}); "
+                        f"resetting presence"
+                    )
+                    close_state(states.pop(exe))
+                    sessions.pop(exe, None)
+                    state = None
                 if state is None:
-                    start_ms = session_start(sessions, game)
+                    start_ms = session_start(sessions, game, current_tick)
                     previous_session = sessions.get(exe)
                     sessions[exe] = {
                         "start_ms": start_ms,
                         "pid": game["pid"],
-                        "start_tick": get_process_start_tick(game["pid"]),
+                        "start_tick": current_tick,
                     }
                     sessions_dirty |= previous_session != sessions[exe]
                     state = {
                         **game,
                         "start_ms": start_ms,
+                        "start_tick": current_tick,
                         "client": RPCClient(
                             base,
                             cfg.get("socket_path", ""),
@@ -188,7 +263,7 @@ def main(argv=None):
                         continue
                     try:
                         state["client"].connect(state["app_id"])
-                    except OSError as e:
+                    except (OSError, ValueError) as e:
                         state["connection_failures"] += 1
                         delay = retry_delay(state["connection_failures"])
                         state["next_connection_attempt"] = time.monotonic() + delay
@@ -237,7 +312,7 @@ def main(argv=None):
                             )
                             state["last_activity_sent"] = now
                             state["last_activity_payload"] = activity
-                        except OSError:
+                        except (OSError, ValueError):
                             log("arRPC connection lost, will reconnect", "warning")
                             state["client"].close()
                             state["connection_failures"] += 1

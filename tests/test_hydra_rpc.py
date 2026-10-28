@@ -702,6 +702,58 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(retry_delay(7), 60)
         self.assertEqual(retry_delay(100), 60)
 
+    def test_instance_lock_is_exclusive(self):
+        NAMESPACE["release_instance_lock"]()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "instance.lock")
+            try:
+                self.assertTrue(NAMESPACE["acquire_instance_lock"](path))
+                self.assertFalse(NAMESPACE["acquire_instance_lock"](path))
+                with open(path, "r") as lock_file:
+                    self.assertEqual(lock_file.read().strip(), str(os.getpid()))
+                NAMESPACE["release_instance_lock"]()
+                self.assertTrue(NAMESPACE["acquire_instance_lock"](path))
+            finally:
+                NAMESPACE["release_instance_lock"]()
+
+    def test_game_restarted_tracks_pid_and_start_tick(self):
+        restarted = NAMESPACE["game_restarted"]
+        state = {"pid": 42, "start_tick": 99}
+
+        self.assertFalse(restarted(state, {"pid": 42}, 99))
+        self.assertTrue(restarted(state, {"pid": 43}, 99))
+        self.assertTrue(restarted(state, {"pid": 42}, 100))
+        self.assertFalse(restarted(state, {"pid": 42}, None))
+        self.assertFalse(restarted(None, {"pid": 42}, 99))
+
+    def test_session_start_accepts_precomputed_tick(self):
+        start_ms = 123456789
+        sessions = {"example.exe": {"start_ms": start_ms, "pid": 42, "start_tick": 99}}
+
+        with patch.dict(NAMESPACE, {
+            "get_process_start_tick": lambda _pid: (_ for _ in ()).throw(
+                AssertionError("must not read /proc again")),
+        }):
+            self.assertEqual(
+                NAMESPACE["session_start"](sessions, {"exe": "example.exe", "pid": 42}, 99),
+                start_ms,
+            )
+
+    def test_close_state_ignores_protocol_errors(self):
+        class Client:
+            sock = object()
+            closed = False
+
+            def send(self, *_args):
+                raise ValueError("IPC frame too large")
+
+            def close(self):
+                self.closed = True
+
+        client = Client()
+        NAMESPACE["close_state"]({"client": client})
+        self.assertTrue(client.closed)
+
     def test_ipc_frame_size_limit(self):
         read_frame = NAMESPACE["read_frame"]
 

@@ -30,8 +30,10 @@ class FakeResponse:
     def __exit__(self, *exc):
         return False
 
-    def read(self):
-        return self._payload
+    def read(self, n=-1):
+        if n < 0 or n >= len(self._payload):
+            return self._payload
+        return self._payload[:n]
 
 
 def urlopen_for(source, sha_body=None, sha_error=None, sig_body=None, sig_error=SIG_404):
@@ -53,47 +55,37 @@ def urlopen_for(source, sha_body=None, sha_error=None, sig_body=None, sig_error=
 
 
 class UpdaterChecksumTests(unittest.TestCase):
-    def test_matching_checksum_passes(self):
+    def test_matching_checksum_parses(self):
         digest = hashlib.sha256(SOURCE).hexdigest()
-        with patch.object(
-            NAMESPACE["urllib"].request, "urlopen",
-            side_effect=urlopen_for(SOURCE, f"{digest}  hydra-rpc\n".encode()),
-        ):
-            self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+        self.assertEqual(
+            NAMESPACE["checksum_from_body"](f"{digest}  hydra-rpc\n".encode()),
+            digest,
+        )
 
-    def test_bare_hex_checksum_passes(self):
+    def test_bare_hex_checksum_parses(self):
         digest = hashlib.sha256(SOURCE).hexdigest()
-        with patch.object(
-            NAMESPACE["urllib"].request, "urlopen",
-            side_effect=urlopen_for(SOURCE, digest.encode()),
-        ):
-            self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+        self.assertEqual(
+            NAMESPACE["checksum_from_body"](digest.encode()), digest)
 
-    def test_mismatch_raises(self):
-        with patch.object(
-            NAMESPACE["urllib"].request, "urlopen",
-            side_effect=urlopen_for(SOURCE, ("0" * 64).encode()),
-        ):
-            with self.assertRaises(ValueError):
-                NAMESPACE["fetch_update_source"]()
+    def test_invalid_checksum_bodies_rejected(self):
+        for body in (b"", b"not-a-checksum", b"0" * 63, b"g" * 64):
+            self.assertIsNone(NAMESPACE["checksum_from_body"](body))
 
-    def test_missing_checksum_falls_back_to_syntax_check(self):
-        with patch.object(
-            NAMESPACE["urllib"].request, "urlopen",
-            side_effect=urlopen_for(
-                SOURCE,
-                sha_error=urllib.error.HTTPError(
-                    "url", 404, "not found", {}, io.BytesIO(b"")),
-            ),
-        ):
-            self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+    def test_read_limited_enforces_ceiling(self):
+        read_limited = NAMESPACE["read_limited"]
+        self.assertEqual(read_limited(FakeResponse(b"abcde"), 5, "test"), b"abcde")
+        with self.assertRaises(ValueError):
+            read_limited(FakeResponse(b"abcdef"), 5, "test")
 
-    def test_malformed_checksum_body_is_ignored(self):
-        with patch.object(
-            NAMESPACE["urllib"].request, "urlopen",
-            side_effect=urlopen_for(SOURCE, b"not-a-checksum"),
-        ):
-            self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+    def test_oversized_update_source_rejected(self):
+        with patch.dict(NAMESPACE, {"MAX_UPDATE_BYTES": 16}):
+            with patch.object(
+                NAMESPACE["urllib"].request, "urlopen",
+                side_effect=urlopen_for(SOURCE, b"0" * 64),
+            ):
+                with self.assertRaises(ValueError) as ctx:
+                    NAMESPACE["fetch_update_source"]()
+        self.assertIn("16-byte limit", str(ctx.exception))
 
 
 class UpdaterSignatureTests(unittest.TestCase):
@@ -155,13 +147,26 @@ class UpdaterSignatureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._fetch(sha_error=SIG_404)
 
-    def test_unpublished_signature_falls_back_to_checksum(self):
-        # Older releases have a checksum but no .sig: keep working.
-        self.assertEqual(self._fetch(sig_error=SIG_404), SOURCE)
+    def test_malformed_checksum_rejected(self):
+        body = b"not-a-checksum"
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sha_body=body, sig_body=self._sign(body, self.SEED))
+        self.assertIn("malformed", str(ctx.exception))
 
-    def test_unsigned_and_unchecksummed_still_syntax_only(self):
-        self.assertEqual(
-            self._fetch(sha_error=SIG_404, sig_error=SIG_404), SOURCE)
+    def test_signed_but_wrong_checksum_rejected(self):
+        body = f"{'0' * 64}  hydra-rpc\n".encode()
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sha_body=body, sig_body=self._sign(body, self.SEED))
+        self.assertIn("checksum mismatch", str(ctx.exception))
+
+    def test_unpublished_signature_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sig_error=SIG_404)
+        self.assertIn("not signed", str(ctx.exception))
+
+    def test_unsigned_and_unchecksummed_rejected(self):
+        with self.assertRaises(ValueError):
+            self._fetch(sha_error=SIG_404, sig_error=SIG_404)
 
 
 class PingProbeTests(unittest.TestCase):
@@ -224,6 +229,26 @@ class SocketDiscoveryTests(unittest.TestCase):
                 "/base/discord-ipc-3",
             ])
 
+    def test_candidate_paths_ignore_last_good_from_another_base(self):
+        with patch.dict(
+            NAMESPACE, {"_LAST_GOOD_SOCKET_PATH": "/other/discord-ipc-2"}
+        ):
+            client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=2)
+            self.assertEqual(client.candidate_paths(), [
+                "/base/discord-ipc-0",
+                "/base/discord-ipc-1",
+            ])
+
+    def test_failed_connect_clears_stale_last_good_path(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=2)
+        with (
+            patch.dict(NAMESPACE, {"_LAST_GOOD_SOCKET_PATH": "/base/discord-ipc-0"}),
+            patch.object(NAMESPACE["RPCClient"], "_connect", side_effect=OSError("refused")),
+        ):
+            with self.assertRaises(OSError):
+                client.connect("123")
+            self.assertEqual(NAMESPACE["_LAST_GOOD_SOCKET_PATH"], "")
+
     def test_successful_connect_records_process_wide_path(self):
         client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=3)
 
@@ -247,6 +272,29 @@ class SocketDiscoveryTests(unittest.TestCase):
             mock_socket.return_value.connect.side_effect = OSError("no socket")
             with self.assertRaises(OSError):
                 client.connect("123")
+
+    def test_handshake_oversized_frame_closes_socket(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=1)
+        closed = []
+
+        class Dummy:
+            def sendall(self, data):
+                pass
+
+            def close(self):
+                closed.append(True)
+
+        with (
+            patch.object(NAMESPACE["RPCClient"], "_connect", return_value=Dummy()),
+            patch.dict(NAMESPACE, {
+                "read_frame": lambda _sock, _timeout: (_ for _ in ()).throw(
+                    ValueError("IPC frame too large")),
+            }),
+        ):
+            with self.assertRaises(ValueError):
+                client.connect("123")
+        self.assertEqual(closed, [True])
+        self.assertIsNone(client.sock)
 
     def test_probe_sockets_reports_failure(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])

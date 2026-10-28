@@ -79,7 +79,11 @@ class RPCClient:
         paths = []
         if self.last_path:
             paths.append(self.last_path)
-        if _LAST_GOOD_SOCKET_PATH and _LAST_GOOD_SOCKET_PATH not in paths:
+        if (
+            _LAST_GOOD_SOCKET_PATH
+            and _LAST_GOOD_SOCKET_PATH.startswith(self.base + "-")
+            and _LAST_GOOD_SOCKET_PATH not in paths
+        ):
             paths.append(_LAST_GOOD_SOCKET_PATH)
         for i in range(self.max_socket_attempts):
             if len(paths) >= self.max_socket_attempts:
@@ -94,7 +98,8 @@ class RPCClient:
         if self.sock is not None:
             self.close()
         last_error = None
-        for path in self.candidate_paths():
+        candidates = self.candidate_paths()
+        for path in candidates:
             self.path = path
             try:
                 self.sock = self._connect()
@@ -105,10 +110,17 @@ class RPCClient:
                 last_error = e
                 self.sock = None
         if self.sock is None:
+            if _LAST_GOOD_SOCKET_PATH in candidates:
+                # Do not let a dead path consume candidate slots next time.
+                _LAST_GOOD_SOCKET_PATH = ""
             self.path = self.socket_path or None
             raise last_error or OSError(f"no arRPC socket found under {self.base}")
-        self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
-        read_frame(self.sock, HANDSHAKE_READ_TIMEOUT)  # drain READY
+        try:
+            self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
+            read_frame(self.sock, HANDSHAKE_READ_TIMEOUT)  # drain READY
+        except (OSError, ValueError):
+            self.close()
+            raise
         self.client_id = client_id
 
     def send(self, cmd, args):

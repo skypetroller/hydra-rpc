@@ -2,7 +2,26 @@
 def download_db(url):
     req = urllib.request.Request(url, headers={"User-Agent": "hydra-rpc/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode("utf-8"))
+        payload = r.read(MAX_DB_BYTES + 1)
+    if len(payload) > MAX_DB_BYTES:
+        raise ValueError(f"database response exceeds {MAX_DB_BYTES} bytes")
+    return json.loads(payload.decode("utf-8"))
+
+
+def validate_db(db):
+    """Reject JSON-valid responses that do not have the expected shape."""
+    if not isinstance(db, list):
+        raise ValueError("expected a JSON list of games")
+    for game in db:
+        if not isinstance(game, dict):
+            raise ValueError("expected game objects")
+        executables = game.get("executables", [])
+        if not isinstance(executables, list):
+            raise ValueError("expected an executable list per game")
+        for executable in executables:
+            if not isinstance(executable, dict):
+                raise ValueError("expected executable objects")
+    return db
 
 
 # Metadata about the last load_db() call, used by build_status_report().
@@ -51,52 +70,65 @@ def load_db(cfg):
             _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
     except OSError:
         pass
-    cached = None
+
     if os.path.exists(DB_CACHE):
         try:
             age = time.time() - os.path.getmtime(DB_CACHE)
             if age < cfg["db_ttl_seconds"]:
                 with open(DB_CACHE, "r") as f:
-                    cached = json.load(f)
+                    cached = validate_db(json.load(f))
+                index = build_index(cached)
                 log(f"using cached game database from {format_age(age)} ago", "debug")
+                return index
         except Exception as e:
             log(f"failed to load cached db ({e})", "warning")
 
-    if cached is None:
+    try:
+        log("downloading detectable applications database...")
+        db = validate_db(download_db(cfg["db_url"]))
+        # Build before persisting: a malformed but JSON-valid response must not
+        # replace a good cache and then crash the watcher.
+        index = build_index(db)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = DB_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(db, f)
+        os.replace(tmp, DB_CACHE)
+        log(f"cached {len(db)} detectable applications")
         try:
-            log("downloading detectable applications database...")
-            db = download_db(cfg["db_url"])
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            tmp = DB_CACHE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(db, f)
-            os.replace(tmp, DB_CACHE)
-            log(f"cached {len(db)} detectable applications")
+            _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+        except OSError:
+            pass
+        _DB_INFO["fresh"] = True
+        return index
+    except Exception as e:
+        if os.path.exists(DB_CACHE):
             try:
-                _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+                stale_age = time.time() - os.path.getmtime(DB_CACHE)
             except OSError:
-                pass
-            _DB_INFO["fresh"] = True
-            cached = db
-        except Exception as e:
-            if os.path.exists(DB_CACHE):
-                try:
-                    stale_age = time.time() - os.path.getmtime(DB_CACHE)
-                except OSError:
-                    stale_age = None
-                age_text = format_age(stale_age) if stale_age is not None else "unknown age"
+                stale_age = None
+            age_text = format_age(stale_age) if stale_age is not None else "unknown age"
+            log(
+                f"could not refresh db ({e}); using stale cache from "
+                f"{age_text} ago with limited detection",
+                "warning",
+            )
+            try:
+                with open(DB_CACHE, "r") as f:
+                    cached = validate_db(json.load(f))
+                index = build_index(cached)
+                _DB_INFO["stale_fallback"] = True
+                return index
+            except Exception as stale_error:
                 log(
-                    f"could not download db ({e}); using stale cache from "
-                    f"{age_text} ago with limited detection",
+                    f"stale db cache is unusable ({stale_error}); "
+                    f"continuing without it",
                     "warning",
                 )
-                _DB_INFO["stale_fallback"] = True
-                with open(DB_CACHE, "r") as f:
-                    cached = json.load(f)
-            else:
-                log(f"could not download db ({e}); no cache available", "error")
+        else:
+            log(f"could not download db ({e}); no cache available", "error")
 
-    return build_index(cached) if cached else {}
+    return {}
 
 
 STALE_SESSION_MAX_AGE_MS = 7 * 24 * 3600 * 1000

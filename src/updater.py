@@ -17,13 +17,20 @@ def validate_update_source(source):
     return source
 
 
+def read_limited(response, limit, label):
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{label} exceeds the {limit}-byte limit")
+    return data
+
+
 def fetch_update_checksum_body():
     # Best-effort fetch of UPDATE_SHA_URL; returns the raw bytes (needed for
     # signature verification) or None when no checksum is published.
     req = urllib.request.Request(UPDATE_SHA_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return response.read()
+            return read_limited(response, MAX_UPDATE_META_BYTES, "update checksum")
     except Exception:
         return None
 
@@ -44,7 +51,7 @@ def fetch_update_signature_body():
     req = urllib.request.Request(UPDATE_SIG_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return response.read()
+            return read_limited(response, MAX_UPDATE_META_BYTES, "update signature")
     except Exception:
         return None
 
@@ -84,34 +91,37 @@ def verify_update_signature(checksum_body, signature):
 def fetch_update_source():
     req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-        source = response.read()
+        source = read_limited(response, MAX_UPDATE_BYTES, "update source")
     checksum_body = fetch_update_checksum_body()
     signature_body = fetch_update_signature_body()
-    if signature_body is not None:
-        # A published signature is authoritative: fail closed if anything
-        # about it (or the checksum it covers) is off.
-        if checksum_body is None:
-            raise ValueError(
-                "update is signed but its checksum file could not be fetched; refusing update"
-            )
-        signature = parse_update_signature(signature_body)
-        if signature is None or not verify_update_signature(checksum_body, signature):
-            raise ValueError(
-                "update signature verification failed (tampered release or unknown key); "
-                "refusing update"
-            )
-        log("update signature verified", "debug")
-    expected = checksum_from_body(checksum_body) if checksum_body is not None else None
-    if expected is not None:
-        actual = hashlib.sha256(source).hexdigest()
-        if actual != expected:
-            raise ValueError(
-                "update checksum mismatch (expected "
-                f"{expected[:12]}..., got {actual[:12]}...); refusing update"
-            )
-        log("update checksum verified", "debug")
-    else:
-        log("no update checksum published; verified Python syntax only", "debug")
+    # Signed releases are mandatory: a missing signature is treated exactly
+    # like an invalid one, so blocking the .sig asset cannot downgrade updates
+    # to checksum/syntax-only verification.
+    if signature_body is None:
+        raise ValueError(
+            "update is not signed; signed releases are required; refusing update"
+        )
+    if checksum_body is None:
+        raise ValueError(
+            "update is signed but its checksum file could not be fetched; refusing update"
+        )
+    signature = parse_update_signature(signature_body)
+    if signature is None or not verify_update_signature(checksum_body, signature):
+        raise ValueError(
+            "update signature verification failed (tampered release or unknown key); "
+            "refusing update"
+        )
+    log("update signature verified", "debug")
+    expected = checksum_from_body(checksum_body)
+    if expected is None:
+        raise ValueError("update checksum file is malformed; refusing update")
+    actual = hashlib.sha256(source).hexdigest()
+    if actual != expected:
+        raise ValueError(
+            "update checksum mismatch (expected "
+            f"{expected[:12]}..., got {actual[:12]}...); refusing update"
+        )
+    log("update checksum verified", "debug")
     return validate_update_source(source)
 
 

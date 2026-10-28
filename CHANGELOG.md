@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-28
+
+### Added
+
+- Single-instance lock (`$XDG_CACHE_HOME/hydra-rpc/instance.lock`): a second
+  watcher exits cleanly instead of fighting over Discord presence and the
+  sessions cache. `--status`, `--validate-config`, and `--dry-run` do not take
+  the lock, so diagnostics still work while the watcher runs.
+
+### Changed
+
+- Updates now require a valid Ed25519 signature; the previous checksum or
+  syntax-only fallback for unsigned releases was removed, closing a downgrade
+  path if the `.sig` asset is missing. Update source, checksum, signature, and
+  database downloads are size-capped.
+- The reported game is reset when the same executable relaunches with a new
+  PID or process start tick between polls, instead of keeping the old session's
+  elapsed time.
+- The process-wide last-good arRPC socket path is scoped to its socket base and
+  cleared when a full connection attempt fails, so it cannot consume candidate
+  slots.
+
+### Fixed
+
+- `load_db` no longer crashes when the cached database is corrupt or when a
+  JSON-valid download has the wrong shape; the index is built before the cache
+  is replaced, and an unusable stale cache is skipped with a warning.
+- Oversized IPC frames during connect, activity send, or shutdown are treated
+  as a lost connection instead of escaping to the generic error handler.
+
 ## [1.1.2] - 2026-10-28
 
 ### Changed

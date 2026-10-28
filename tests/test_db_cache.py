@@ -69,6 +69,53 @@ class DbCacheTests(unittest.TestCase):
         self.assertEqual(index, {"game.exe": ("123", "Game")})
         self.assertTrue(stale)
 
+    def test_corrupt_stale_cache_does_not_crash(self):
+        import urllib.error
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            cache.write_text("{not json")
+            old = time.time() - 8 * 24 * 3600
+            os.utime(cache, (old, old))
+            with patch.dict(NAMESPACE, {"DB_CACHE": str(cache), "CACHE_DIR": directory}):
+                with patch.dict(NAMESPACE, {
+                    "download_db": lambda _url: (_ for _ in ()).throw(
+                        urllib.error.URLError("offline")),
+                }):
+                    index = NAMESPACE["load_db"](make_cfg())
+        self.assertEqual(index, {})
+
+    def test_malformed_download_does_not_replace_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            cache.write_text(json.dumps(SAMPLE_DB))
+            old = time.time() - 8 * 24 * 3600
+            os.utime(cache, (old, old))
+            with patch.dict(NAMESPACE, {"DB_CACHE": str(cache), "CACHE_DIR": directory}):
+                with patch.dict(NAMESPACE, {"download_db": lambda _url: [1, 2, 3]}):
+                    index = NAMESPACE["load_db"](make_cfg())
+            cached_after = json.loads(cache.read_text())
+        self.assertEqual(index, {"game.exe": ("123", "Game")})
+        self.assertEqual(cached_after, SAMPLE_DB)
+
+    def test_oversized_download_rejected(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n=-1):
+                return b"x" * 10
+
+        with patch.dict(NAMESPACE, {"MAX_DB_BYTES": 5}):
+            with patch.object(
+                NAMESPACE["urllib"].request, "urlopen", return_value=Response()
+            ):
+                with self.assertRaises(ValueError):
+                    NAMESPACE["download_db"]("https://example.invalid/db")
+
     def test_format_age(self):
         fmt = NAMESPACE["format_age"]
         self.assertEqual(fmt(5), "5s")

@@ -4,7 +4,7 @@ def close_state(state):
     if client.sock is not None:
         try:
             client.send("SET_ACTIVITY", {"activity": None, "pid": 0})
-        except OSError:
+        except (OSError, ValueError):
             pass
     client.close()
 
@@ -20,10 +20,11 @@ def get_process_start_tick(pid):
         return None
 
 
-def session_start(sessions, game):
+def session_start(sessions, game, current_tick=None):
     record = sessions.get(game["exe"])
     now_ms = int(time.time() * 1000)
-    current_tick = get_process_start_tick(game["pid"])
+    if current_tick is None:
+        current_tick = get_process_start_tick(game["pid"])
     if isinstance(record, dict):
         try:
             start_ms = int(record["start_ms"])

@@ -9,6 +9,7 @@ Vesktop or any other arRPC client.
 import argparse
 import base64
 import copy
+import fcntl
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ CACHE_DIR = os.path.join(
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DB_CACHE = os.path.join(CACHE_DIR, "detectable.json")
 SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
+LOCK_PATH = os.path.join(CACHE_DIR, "instance.lock")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
@@ -44,8 +46,13 @@ UPDATE_PUBLIC_KEYS = (
     "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
 )
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.1.2"
+SCRIPT_VERSION = "1.2.0"
 UPDATE_TIMEOUT = 30
+# Response-size ceilings: the bundle is ~80 KiB, checksum/signature files are
+# tiny, and the detectable-applications database is ~13 MiB.
+MAX_UPDATE_BYTES = 1 << 20
+MAX_UPDATE_META_BYTES = 16 << 10
+MAX_DB_BYTES = 64 << 20
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
 ACTIVITY_ACK_TIMEOUT = 0.5
@@ -614,7 +621,26 @@ def ensure_config(cfg):
 def download_db(url):
     req = urllib.request.Request(url, headers={"User-Agent": "hydra-rpc/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode("utf-8"))
+        payload = r.read(MAX_DB_BYTES + 1)
+    if len(payload) > MAX_DB_BYTES:
+        raise ValueError(f"database response exceeds {MAX_DB_BYTES} bytes")
+    return json.loads(payload.decode("utf-8"))
+
+
+def validate_db(db):
+    """Reject JSON-valid responses that do not have the expected shape."""
+    if not isinstance(db, list):
+        raise ValueError("expected a JSON list of games")
+    for game in db:
+        if not isinstance(game, dict):
+            raise ValueError("expected game objects")
+        executables = game.get("executables", [])
+        if not isinstance(executables, list):
+            raise ValueError("expected an executable list per game")
+        for executable in executables:
+            if not isinstance(executable, dict):
+                raise ValueError("expected executable objects")
+    return db
 
 
 # Metadata about the last load_db() call, used by build_status_report().
@@ -663,52 +689,65 @@ def load_db(cfg):
             _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
     except OSError:
         pass
-    cached = None
+
     if os.path.exists(DB_CACHE):
         try:
             age = time.time() - os.path.getmtime(DB_CACHE)
             if age < cfg["db_ttl_seconds"]:
                 with open(DB_CACHE, "r") as f:
-                    cached = json.load(f)
+                    cached = validate_db(json.load(f))
+                index = build_index(cached)
                 log(f"using cached game database from {format_age(age)} ago", "debug")
+                return index
         except Exception as e:
             log(f"failed to load cached db ({e})", "warning")
 
-    if cached is None:
+    try:
+        log("downloading detectable applications database...")
+        db = validate_db(download_db(cfg["db_url"]))
+        # Build before persisting: a malformed but JSON-valid response must not
+        # replace a good cache and then crash the watcher.
+        index = build_index(db)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = DB_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(db, f)
+        os.replace(tmp, DB_CACHE)
+        log(f"cached {len(db)} detectable applications")
         try:
-            log("downloading detectable applications database...")
-            db = download_db(cfg["db_url"])
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            tmp = DB_CACHE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(db, f)
-            os.replace(tmp, DB_CACHE)
-            log(f"cached {len(db)} detectable applications")
+            _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+        except OSError:
+            pass
+        _DB_INFO["fresh"] = True
+        return index
+    except Exception as e:
+        if os.path.exists(DB_CACHE):
             try:
-                _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
+                stale_age = time.time() - os.path.getmtime(DB_CACHE)
             except OSError:
-                pass
-            _DB_INFO["fresh"] = True
-            cached = db
-        except Exception as e:
-            if os.path.exists(DB_CACHE):
-                try:
-                    stale_age = time.time() - os.path.getmtime(DB_CACHE)
-                except OSError:
-                    stale_age = None
-                age_text = format_age(stale_age) if stale_age is not None else "unknown age"
+                stale_age = None
+            age_text = format_age(stale_age) if stale_age is not None else "unknown age"
+            log(
+                f"could not refresh db ({e}); using stale cache from "
+                f"{age_text} ago with limited detection",
+                "warning",
+            )
+            try:
+                with open(DB_CACHE, "r") as f:
+                    cached = validate_db(json.load(f))
+                index = build_index(cached)
+                _DB_INFO["stale_fallback"] = True
+                return index
+            except Exception as stale_error:
                 log(
-                    f"could not download db ({e}); using stale cache from "
-                    f"{age_text} ago with limited detection",
+                    f"stale db cache is unusable ({stale_error}); "
+                    f"continuing without it",
                     "warning",
                 )
-                _DB_INFO["stale_fallback"] = True
-                with open(DB_CACHE, "r") as f:
-                    cached = json.load(f)
-            else:
-                log(f"could not download db ({e}); no cache available", "error")
+        else:
+            log(f"could not download db ({e}); no cache available", "error")
 
-    return build_index(cached) if cached else {}
+    return {}
 
 
 STALE_SESSION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
@@ -782,13 +821,20 @@ def validate_update_source(source):
     return source
 
 
+def read_limited(response, limit, label):
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{label} exceeds the {limit}-byte limit")
+    return data
+
+
 def fetch_update_checksum_body():
     # Best-effort fetch of UPDATE_SHA_URL; returns the raw bytes (needed for
     # signature verification) or None when no checksum is published.
     req = urllib.request.Request(UPDATE_SHA_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return response.read()
+            return read_limited(response, MAX_UPDATE_META_BYTES, "update checksum")
     except Exception:
         return None
 
@@ -809,7 +855,7 @@ def fetch_update_signature_body():
     req = urllib.request.Request(UPDATE_SIG_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return response.read()
+            return read_limited(response, MAX_UPDATE_META_BYTES, "update signature")
     except Exception:
         return None
 
@@ -849,34 +895,37 @@ def verify_update_signature(checksum_body, signature):
 def fetch_update_source():
     req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-        source = response.read()
+        source = read_limited(response, MAX_UPDATE_BYTES, "update source")
     checksum_body = fetch_update_checksum_body()
     signature_body = fetch_update_signature_body()
-    if signature_body is not None:
-        # A published signature is authoritative: fail closed if anything
-        # about it (or the checksum it covers) is off.
-        if checksum_body is None:
-            raise ValueError(
-                "update is signed but its checksum file could not be fetched; refusing update"
-            )
-        signature = parse_update_signature(signature_body)
-        if signature is None or not verify_update_signature(checksum_body, signature):
-            raise ValueError(
-                "update signature verification failed (tampered release or unknown key); "
-                "refusing update"
-            )
-        log("update signature verified", "debug")
-    expected = checksum_from_body(checksum_body) if checksum_body is not None else None
-    if expected is not None:
-        actual = hashlib.sha256(source).hexdigest()
-        if actual != expected:
-            raise ValueError(
-                "update checksum mismatch (expected "
-                f"{expected[:12]}..., got {actual[:12]}...); refusing update"
-            )
-        log("update checksum verified", "debug")
-    else:
-        log("no update checksum published; verified Python syntax only", "debug")
+    # Signed releases are mandatory: a missing signature is treated exactly
+    # like an invalid one, so blocking the .sig asset cannot downgrade updates
+    # to checksum/syntax-only verification.
+    if signature_body is None:
+        raise ValueError(
+            "update is not signed; signed releases are required; refusing update"
+        )
+    if checksum_body is None:
+        raise ValueError(
+            "update is signed but its checksum file could not be fetched; refusing update"
+        )
+    signature = parse_update_signature(signature_body)
+    if signature is None or not verify_update_signature(checksum_body, signature):
+        raise ValueError(
+            "update signature verification failed (tampered release or unknown key); "
+            "refusing update"
+        )
+    log("update signature verified", "debug")
+    expected = checksum_from_body(checksum_body)
+    if expected is None:
+        raise ValueError("update checksum file is malformed; refusing update")
+    actual = hashlib.sha256(source).hexdigest()
+    if actual != expected:
+        raise ValueError(
+            "update checksum mismatch (expected "
+            f"{expected[:12]}..., got {actual[:12]}...); refusing update"
+        )
+    log("update checksum verified", "debug")
     return validate_update_source(source)
 
 
@@ -1007,7 +1056,11 @@ class RPCClient:
         paths = []
         if self.last_path:
             paths.append(self.last_path)
-        if _LAST_GOOD_SOCKET_PATH and _LAST_GOOD_SOCKET_PATH not in paths:
+        if (
+            _LAST_GOOD_SOCKET_PATH
+            and _LAST_GOOD_SOCKET_PATH.startswith(self.base + "-")
+            and _LAST_GOOD_SOCKET_PATH not in paths
+        ):
             paths.append(_LAST_GOOD_SOCKET_PATH)
         for i in range(self.max_socket_attempts):
             if len(paths) >= self.max_socket_attempts:
@@ -1022,7 +1075,8 @@ class RPCClient:
         if self.sock is not None:
             self.close()
         last_error = None
-        for path in self.candidate_paths():
+        candidates = self.candidate_paths()
+        for path in candidates:
             self.path = path
             try:
                 self.sock = self._connect()
@@ -1033,10 +1087,17 @@ class RPCClient:
                 last_error = e
                 self.sock = None
         if self.sock is None:
+            if _LAST_GOOD_SOCKET_PATH in candidates:
+                # Do not let a dead path consume candidate slots next time.
+                _LAST_GOOD_SOCKET_PATH = ""
             self.path = self.socket_path or None
             raise last_error or OSError(f"no arRPC socket found under {self.base}")
-        self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
-        read_frame(self.sock, HANDSHAKE_READ_TIMEOUT)  # drain READY
+        try:
+            self.sock.sendall(encode_frame(IPC_HANDSHAKE, {"v": 1, "client_id": client_id}))
+            read_frame(self.sock, HANDSHAKE_READ_TIMEOUT)  # drain READY
+        except (OSError, ValueError):
+            self.close()
+            raise
         self.client_id = client_id
 
     def send(self, cmd, args):
@@ -1645,7 +1706,7 @@ def close_state(state):
     if client.sock is not None:
         try:
             client.send("SET_ACTIVITY", {"activity": None, "pid": 0})
-        except OSError:
+        except (OSError, ValueError):
             pass
     client.close()
 
@@ -1661,10 +1722,11 @@ def get_process_start_tick(pid):
         return None
 
 
-def session_start(sessions, game):
+def session_start(sessions, game, current_tick=None):
     record = sessions.get(game["exe"])
     now_ms = int(time.time() * 1000)
-    current_tick = get_process_start_tick(game["pid"])
+    if current_tick is None:
+        current_tick = get_process_start_tick(game["pid"])
     if isinstance(record, dict):
         try:
             start_ms = int(record["start_ms"])
@@ -1935,6 +1997,60 @@ def detect_exes(blocklist, hydra_markers=None):
     return {key: info for key, info in found.items() if info.get("kind") != "emulator"}
 
 
+_INSTANCE_LOCK_FD = None
+
+
+def release_instance_lock():
+    global _INSTANCE_LOCK_FD
+    if _INSTANCE_LOCK_FD is not None:
+        try:
+            os.close(_INSTANCE_LOCK_FD)
+        except OSError:
+            pass
+        _INSTANCE_LOCK_FD = None
+
+
+def game_restarted(state, game, current_tick):
+    """True when the same executable now belongs to a different process."""
+    if state is None:
+        return False
+    return state.get("pid") != game["pid"] or (
+        current_tick is not None and state.get("start_tick") != current_tick
+    )
+
+
+def acquire_instance_lock(path=None):
+    """Take the watcher's single-instance lock; False if another owns it."""
+    global _INSTANCE_LOCK_FD
+    path = path or LOCK_PATH
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        # An unwritable cache dir should not stop presence reporting.
+        log(f"could not open instance lock '{path}': {e}", "warning")
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = ""
+        try:
+            holder = os.pread(fd, 32, 0).decode("ascii", "ignore").strip()
+        except OSError:
+            pass
+        os.close(fd)
+        suffix = f" (pid {holder})" if holder else ""
+        log(f"another hydra-rpc instance is already running{suffix}; exiting")
+        return False
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+    except OSError:
+        pass
+    _INSTANCE_LOCK_FD = fd
+    return True
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.check_update:
@@ -1947,6 +2063,19 @@ def main(argv=None):
     cfg = load_config()
     configure_logging(cfg)
     ensure_config(cfg)
+
+    if args.json and not args.status:
+        print("--json requires --status", file=sys.stderr)
+        close_logging()
+        return 2
+
+    # Only the real watcher is exclusive; diagnostics and --dry-run must remain
+    # usable while it is running.
+    if not (args.validate_config or args.status or args.dry_run):
+        if not acquire_instance_lock():
+            close_logging()
+            return 0
+
     index = load_db(cfg)
     if not index:
         log("no detectable database available; games will need overrides", "error")
@@ -1956,11 +2085,6 @@ def main(argv=None):
         valid = validate_config(cfg, index)
         close_logging()
         return 0 if valid else 1
-
-    if args.json and not args.status:
-        print("--json requires --status", file=sys.stderr)
-        close_logging()
-        return 2
 
     if args.status:
         print_status(cfg, index, as_json=args.json)
@@ -1979,6 +2103,7 @@ def main(argv=None):
         for state in states.values():
             close_state(state)
         save_sessions(sessions)
+        release_instance_lock()
         close_logging()
         sys.exit(0)
 
@@ -2077,19 +2202,31 @@ def main(argv=None):
                         sessions_dirty = True
 
             for exe, game in selected.items():
+                current_tick = get_process_start_tick(game["pid"])
                 state = states.get(exe)
+                if game_restarted(state, game, current_tick):
+                    # The same executable relaunched between polls: do not keep
+                    # the old session's elapsed time or presence payload.
+                    log(
+                        f"game restarted: {state['display_name']} ({exe}); "
+                        f"resetting presence"
+                    )
+                    close_state(states.pop(exe))
+                    sessions.pop(exe, None)
+                    state = None
                 if state is None:
-                    start_ms = session_start(sessions, game)
+                    start_ms = session_start(sessions, game, current_tick)
                     previous_session = sessions.get(exe)
                     sessions[exe] = {
                         "start_ms": start_ms,
                         "pid": game["pid"],
-                        "start_tick": get_process_start_tick(game["pid"]),
+                        "start_tick": current_tick,
                     }
                     sessions_dirty |= previous_session != sessions[exe]
                     state = {
                         **game,
                         "start_ms": start_ms,
+                        "start_tick": current_tick,
                         "client": RPCClient(
                             base,
                             cfg.get("socket_path", ""),
@@ -2124,7 +2261,7 @@ def main(argv=None):
                         continue
                     try:
                         state["client"].connect(state["app_id"])
-                    except OSError as e:
+                    except (OSError, ValueError) as e:
                         state["connection_failures"] += 1
                         delay = retry_delay(state["connection_failures"])
                         state["next_connection_attempt"] = time.monotonic() + delay
@@ -2173,7 +2310,7 @@ def main(argv=None):
                             )
                             state["last_activity_sent"] = now
                             state["last_activity_payload"] = activity
-                        except OSError:
+                        except (OSError, ValueError):
                             log("arRPC connection lost, will reconnect", "warning")
                             state["client"].close()
                             state["connection_failures"] += 1

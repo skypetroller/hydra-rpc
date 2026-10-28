@@ -20,8 +20,38 @@ jobs:
           python-version: "3.x"
       - name: Verify bundle matches src/
         run: python3 build.py --check
+      - name: Verify tag, version, and changelog
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["TAG_NAME"]
+          if not tag.startswith("v"):
+              raise SystemExit(f"release tag must start with v: {tag}")
+          version = tag[1:]
+          script = Path("hydra-rpc").read_text()
+          match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', script, re.M)
+          if not match:
+              raise SystemExit("SCRIPT_VERSION not found in bundle")
+          if match.group(1) != version:
+              raise SystemExit(
+                  f"tag {tag} does not match SCRIPT_VERSION {match.group(1)}")
+          changelog = Path("CHANGELOG.md").read_text()
+          section = re.search(
+              rf"^## \[{re.escape(version)}\].*?(?=^## \[|\Z)",
+              changelog, re.M | re.S)
+          if not section or not section.group(0).strip():
+              raise SystemExit(f"CHANGELOG.md has no [{version}] section")
+          print(f"release metadata OK: {tag} / {match.group(1)}")
+          EOF
       - name: Run tests
         run: python -m unittest discover --start-directory tests
+      - name: Verify config schema
+        run: python3 scripts/check_config_schema.py
       - name: Verify updater checksum file is fresh
         # Policy: hydra-rpc.sha256 is committed so the updater can verify
         # against raw.githubusercontent.com. Regenerate with `make sha256`

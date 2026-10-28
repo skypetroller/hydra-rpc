@@ -10,6 +10,7 @@ Vesktop or any other arRPC client.
 import argparse
 import base64
 import copy
+import fcntl
 import hashlib
 import json
 import math
@@ -32,6 +33,7 @@ CACHE_DIR = os.path.join(
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DB_CACHE = os.path.join(CACHE_DIR, "detectable.json")
 SESSION_CACHE = os.path.join(CACHE_DIR, "sessions.json")
+LOCK_PATH = os.path.join(CACHE_DIR, "instance.lock")
 
 DB_URL = "https://discord.com/api/v9/applications/detectable"
 UPDATE_URL = "https://raw.githubusercontent.com/skypetroller/hydra-rpc/main/hydra-rpc"
@@ -45,8 +47,13 @@ UPDATE_PUBLIC_KEYS = (
     "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
 )
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.1.2"
+SCRIPT_VERSION = "1.2.0"
 UPDATE_TIMEOUT = 30
+# Response-size ceilings: the bundle is ~80 KiB, checksum/signature files are
+# tiny, and the detectable-applications database is ~13 MiB.
+MAX_UPDATE_BYTES = 1 << 20
+MAX_UPDATE_META_BYTES = 16 << 10
+MAX_DB_BYTES = 64 << 20
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
 ACTIVITY_ACK_TIMEOUT = 0.5

@@ -26,6 +26,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes and
   troubleshooting commands (detection table with match reasons, no Discord traffic).
 - Includes explicit `--check-update` and `--update` commands.
 - Supports optional file logging and automatic arRPC socket recovery.
+- Enforces a single watcher instance; `--status`, `--validate-config`, and
+  `--dry-run` still work alongside it.
 - Includes an optional Hydra-marker mode that can reduce conflicts with other launchers' RPC.
 
 The tool intentionally reports games generically. It does not add launcher names to your
@@ -159,7 +161,8 @@ mkdir -p ~/.config/autostart
 cp hydra-rpc.desktop ~/.config/autostart/
 ```
 
-Use only one startup method so you do not start two copies of the watcher.
+Use only one startup method. A single-instance lock makes a duplicate watcher
+exit cleanly, but one startup method keeps logs and restarts predictable.
 
 ## Choose A Mode
 
@@ -301,14 +304,14 @@ Before installing, the download is verified in layers:
 
 1. **Ed25519 signature** — `hydra-rpc.sha256.sig` (a signature over the exact
    bytes of the checksum file) must verify against a release key embedded in
-   the running script (`UPDATE_PUBLIC_KEYS`). A published signature that does
-   not verify is a hard failure: the updater refuses the update.
+   the running script (`UPDATE_PUBLIC_KEYS`). Signed releases are mandatory: a
+   missing, malformed, or non-verifying signature is a hard failure.
 2. **SHA256 checksum** — the downloaded script must match `hydra-rpc.sha256`.
-3. **Syntax check** — always performed. When neither a signature nor a checksum
-   is published (e.g. an old mirror), the updater logs that only syntax was
-   verified and continues.
+3. **Syntax check** — always performed after the signature and checksum pass.
 
-Releases attach `hydra-rpc`, `hydra-rpc.sha256`, and `hydra-rpc.sha256.sig`.
+Downloaded update metadata, the script, and the game database are size-capped,
+so a malformed or hostile response cannot exhaust memory. Releases attach
+`hydra-rpc`, `hydra-rpc.sha256`, and `hydra-rpc.sha256.sig`.
 Key rotation ships a release whose `UPDATE_PUBLIC_KEYS` lists both the old and
 the new key, so existing installs keep updating; the signing key is then
 switched. Verify a checkout with `make verify` or `python3 scripts/check_sig.py`.
