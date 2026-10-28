@@ -65,6 +65,17 @@ def _contains_any(blob, needles):
     return any(needle in blob for needle in needles)
 
 
+# Lowercase pattern tokens for every supported emulator. A Flatpak/bwrap
+# process only needs full argv decoding when one of these appears in its raw
+# cmdline (the Flatpak app id or wrapped binary always contains it); this
+# skips the decode/join/casefold work for every unrelated sandboxed process.
+_EMULATOR_TOKEN_BYTES = tuple(sorted({
+    pattern.encode("utf-8")
+    for settings in EMULATOR_PROFILES.values()
+    for pattern in settings["patterns"]
+}))
+
+
 def has_hydra_marker(pid, raw_parts, markers, stats=None):
     byte_markers = _marker_bytes(markers)
     if not byte_markers:
@@ -124,12 +135,15 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
             piece = part.rstrip()
             if len(piece) < 4 or piece[-4:].lower() != b".exe":
                 continue
-            if mark_hydra and hydra_state is None:
-                hydra_state = has_hydra_marker(pid, parts, markers, stats)
             arg = piece.decode("utf-8", "ignore")
             base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
             if not base or base in blocklist:
                 continue
+            # Check the blocklist first: Wine service processes (services.exe,
+            # explorer.exe, ...) are discarded either way, so don't pay for an
+            # environ read just to mark them as Hydra-launched.
+            if mark_hydra and hydra_state is None:
+                hydra_state = has_hydra_marker(pid, parts, markers, stats)
             info = found.setdefault(
                 base,
                 {"pid": pid, "path": arg, "sources": set()},
@@ -149,8 +163,13 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
                 if token in base0:
                     profile = candidate
                     break
-        if profile is None and base0 not in ("flatpak", "bwrap"):
-            continue
+        if profile is None:
+            if base0 not in ("flatpak", "bwrap"):
+                continue
+            # Only decode sandbox wrappers that could actually wrap an
+            # emulator; unrelated Flatpak apps are the common case.
+            if not _contains_any(raw.lower(), _EMULATOR_TOKEN_BYTES):
+                continue
         if decoded is None:
             decoded = _decode_parts(parts)
         text = " ".join(decoded).casefold()

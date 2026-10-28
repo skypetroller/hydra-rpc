@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-28
+
+### Changed
+
+- Performance: Hydra marker checks are skipped for blocklisted executables,
+  so Wine service processes no longer cost an environ read on every poll; and
+  Flatpak/bwrap processes whose raw cmdline contains no emulator token are no
+  longer argv-decoded in the emulator scan. Behaviour is unchanged.
+
 ## [1.1.0] - 2026-10-15
 
 ### Added

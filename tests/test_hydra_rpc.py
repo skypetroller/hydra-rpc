@@ -172,6 +172,80 @@ class HydraRpcTests(unittest.TestCase):
 
         self.assertEqual(marked["game.exe"]["sources"], {"hydra"})
 
+    def test_blocklisted_exe_skips_hydra_environ_read(self):
+        # Wine service processes are dropped by the blocklist; marking them
+        # first would waste an environ read on every poll.
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": (
+                    b"/usr/bin/wine\0/unix\0/mnt/prefix/drive_c/windows/"
+                    b"system32/services.exe\0"
+                ),
+                "environ": b"GAMEID=umu-1\0",
+            },
+        }
+        environ_opens = []
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            if match.group(2) == "environ":
+                environ_opens.append(match.group(1))
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        stats = {}
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](
+                {"services.exe"}, {"gameid=umu-1"}, False, True, stats,
+            )
+
+        self.assertEqual(found, {})
+        self.assertEqual(environ_opens, [])
+        self.assertEqual(stats.get("environ_reads", 0), 0)
+
+    def test_unrelated_flatpak_process_skips_argv_decode(self):
+        # Only sandbox wrappers whose raw cmdline mentions an emulator token
+        # are decoded; other Flatpak apps must be skipped cheaply.
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"flatpak\0run\0org.example.Notes\0/roms/notes.iso\0",
+                "environ": b"",
+            },
+            "101": {
+                "cmdline": b"flatpak\0run\0org.libretro.RetroArch\0/roms/game.sfc\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        decode_calls = []
+        original_decode = NAMESPACE["_decode_parts"]
+
+        def spy(parts):
+            decode_calls.append(parts)
+            return original_decode(parts)
+
+        with (
+            patch("os.listdir", return_value=["100", "101"]),
+            patch("builtins.open", side_effect=fake_open),
+            patch.dict(NAMESPACE, {"_decode_parts": spy}),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+
+        self.assertIn("emulator:retroarch:/roms/game.sfc", found)
+        self.assertEqual(len(decode_calls), 1)
+
     def test_rendered_activities_are_cached(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
         cfg["blocklist_ids"] = set()
