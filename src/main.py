@@ -67,18 +67,22 @@ def main(argv=None):
                 stats,
             )
             scan_ms = (time.monotonic() - scan_start) * 1000
-            log(
-                f"scan: {stats.get('processes', 0)} procs, "
-                f"{stats.get('cmdlines', 0)} cmdlines, "
-                f"{stats.get('environ_reads', 0)} environs, "
-                f"{stats.get('emulator_candidates', 0)} emu candidates, "
-                f"{stats.get('wine_hits', 0)} wine + "
-                f"{stats.get('emulator_hits', 0)} emu hits "
-                f"in {scan_ms:.1f}ms",
-                "debug",
-            )
+            if log_enabled("debug"):
+                log(
+                    f"scan: {stats.get('processes', 0)} procs, "
+                    f"{stats.get('cmdlines', 0)} cmdlines, "
+                    f"{stats.get('environ_reads', 0)} environs, "
+                    f"{stats.get('environ_cache_hits', 0)} cache hits, "
+                    f"{stats.get('emulator_candidates', 0)} emu candidates, "
+                    f"{stats.get('wine_hits', 0)} wine + "
+                    f"{stats.get('emulator_hits', 0)} emu hits "
+                    f"in {scan_ms:.1f}ms",
+                    "debug",
+                )
 
             for exe in sorted(exes):
+                if exe in seen_unknown:
+                    continue
                 info = exes[exe]
                 if isinstance(info, dict) and info.get("kind") == "emulator":
                     configured = bool(emulator_application_id(exe, info, cfg))
@@ -90,7 +94,7 @@ def main(argv=None):
                 else:
                     configured = bool(cfg["overrides"].get(exe) or index.get(exe))
                     message = f"unrecognized executable '{exe}' (add an override in {CONFIG_PATH})"
-                if not configured and exe not in seen_unknown:
+                if not configured:
                     seen_unknown.add(exe)
                     log(message, "warning")
 

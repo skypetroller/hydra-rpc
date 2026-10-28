@@ -11,9 +11,10 @@ def close_state(state):
 
 def get_process_start_tick(pid):
     try:
-        with open(f"/proc/{pid}/stat", "r") as stat_file:
-            stat = stat_file.read()
-        fields = stat.rsplit(")", 1)[1].split()
+        # Raw reads avoid buffering overhead; stat is a single short line.
+        with open(f"/proc/{pid}/stat", "rb", buffering=0) as stat_file:
+            stat = stat_file.read(4096)
+        fields = stat.rsplit(b")", 1)[1].split()
         return int(fields[19])
     except (OSError, ValueError, IndexError):
         return None
@@ -47,6 +48,13 @@ _ENVIRON_CHUNK_BYTES = 65536
 
 _MARKER_BYTES_CACHE = {}
 _MARKER_BYTES_CACHE_MAX = 64
+
+# Marker lookups are repeated every poll for the same long-lived Wine PIDs.
+# Remember the answer per (pid, start tick, marker set) so steady-state scans
+# skip the environ read entirely. A changed start tick means PID reuse, which
+# invalidates the entry. Unreadable environs are never cached.
+_MARKER_RESULT_CACHE = {}
+_MARKER_RESULT_CACHE_MAX = 512
 
 
 def _marker_bytes(markers):
@@ -82,23 +90,39 @@ def has_hydra_marker(pid, raw_parts, markers, stats=None):
         return False
     if _contains_any(b"\0".join(p for p in raw_parts if p).lower(), byte_markers):
         return True
+    marker_key = frozenset(markers)
+    start_tick = get_process_start_tick(pid)
+    cache_key = (pid, start_tick, marker_key) if start_tick is not None else None
+    if cache_key is not None:
+        cached = _MARKER_RESULT_CACHE.get(cache_key)
+        if cached is not None:
+            if stats is not None:
+                stats["environ_cache_hits"] = stats.get("environ_cache_hits", 0) + 1
+            return cached
     # Stream the environment in chunks instead of loading/decoding it whole.
     # Keep an overlap so a marker split across a chunk boundary is still found.
     overlap = max(len(marker) for marker in byte_markers)
+    found = False
     try:
-        with open(f"/proc/{pid}/environ", "rb") as environment_file:
+        with open(f"/proc/{pid}/environ", "rb", buffering=0) as environment_file:
             if stats is not None:
                 stats["environ_reads"] = stats.get("environ_reads", 0) + 1
             tail = b""
             while True:
                 chunk = environment_file.read(_ENVIRON_CHUNK_BYTES)
                 if not chunk:
-                    return False
+                    break
                 if _contains_any((tail + chunk).lower(), byte_markers):
-                    return True
+                    found = True
+                    break
                 tail = chunk[-(overlap - 1):] if overlap > 1 else b""
     except OSError:
         return False
+    if cache_key is not None:
+        if len(_MARKER_RESULT_CACHE) >= _MARKER_RESULT_CACHE_MAX:
+            _MARKER_RESULT_CACHE.clear()
+        _MARKER_RESULT_CACHE[cache_key] = found
+    return found
 
 
 def _iter_cmdlines(stats=None):
@@ -112,8 +136,18 @@ def _iter_cmdlines(stats=None):
         if stats is not None:
             stats["processes"] = stats.get("processes", 0) + 1
         try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                raw = f.read()
+            # Raw, chunked read: cmdline is usually well under one chunk, and
+            # unbuffered file objects are measurably cheaper than buffered ones.
+            with open(f"/proc/{pid}/cmdline", "rb", buffering=0) as f:
+                raw = f.read(_ENVIRON_CHUNK_BYTES)
+                if len(raw) == _ENVIRON_CHUNK_BYTES:
+                    chunks = [raw]
+                    while True:
+                        chunk = f.read(_ENVIRON_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    raw = b"".join(chunks)
         except OSError:
             continue
         if not raw:
@@ -127,29 +161,36 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
     markers = set(hydra_markers or DEFAULT_HYDRA_MARKERS)
     found = {}
     for pid, raw in _iter_cmdlines(stats):
+        raw_lower = raw.lower()
+        has_exe = b".exe" in raw_lower
+        # Without emulator detection a cmdline with no ".exe" token cannot
+        # contribute anything, so skip splitting it into arguments.
+        if not emulators_enabled and not has_exe:
+            continue
         parts = raw.split(b"\0")
         decoded = None
         hydra_state = None
 
-        for part in parts:
-            piece = part.rstrip()
-            if len(piece) < 4 or piece[-4:].lower() != b".exe":
-                continue
-            arg = piece.decode("utf-8", "ignore")
-            base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
-            if not base or base in blocklist:
-                continue
-            # Check the blocklist first: Wine service processes (services.exe,
-            # explorer.exe, ...) are discarded either way, so don't pay for an
-            # environ read just to mark them as Hydra-launched.
-            if mark_hydra and hydra_state is None:
-                hydra_state = has_hydra_marker(pid, parts, markers, stats)
-            info = found.setdefault(
-                base,
-                {"pid": pid, "path": arg, "sources": set()},
-            )
-            if hydra_state:
-                info["sources"].add("hydra")
+        if has_exe:
+            for part in parts:
+                piece = part.rstrip()
+                if len(piece) < 4 or piece[-4:].lower() != b".exe":
+                    continue
+                arg = piece.decode("utf-8", "ignore")
+                base = arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                if not base or base in blocklist:
+                    continue
+                # Check the blocklist first: Wine service processes (services.exe,
+                # explorer.exe, ...) are discarded either way, so don't pay for an
+                # environ read just to mark them as Hydra-launched.
+                if mark_hydra and hydra_state is None:
+                    hydra_state = has_hydra_marker(pid, parts, markers, stats)
+                info = found.setdefault(
+                    base,
+                    {"pid": pid, "path": arg, "sources": set()},
+                )
+                if hydra_state:
+                    info["sources"].add("hydra")
 
         if not emulators_enabled:
             continue
@@ -168,7 +209,7 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
                 continue
             # Only decode sandbox wrappers that could actually wrap an
             # emulator; unrelated Flatpak apps are the common case.
-            if not _contains_any(raw.lower(), _EMULATOR_TOKEN_BYTES):
+            if not _contains_any(raw_lower, _EMULATOR_TOKEN_BYTES):
                 continue
         if decoded is None:
             decoded = _decode_parts(parts)

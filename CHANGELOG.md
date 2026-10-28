@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-28
+
+### Changed
+
+- Performance pass on the polling hot path: `/proc/<pid>/cmdline` and
+  `/proc/<pid>/stat` use unbuffered chunked reads; cmdlines without an `.exe`
+  token are not split when emulator detection is off; Hydra marker results are
+  cached per PID + process start tick + marker set so steady-state scans skip
+  environ reads; the debug scan summary is only formatted when debug logging is
+  enabled and per-executable warning text is built once; and the last working
+  IPC socket path is remembered process-wide for new clients. Detection
+  behaviour is unchanged.
+
 ## [1.1.1] - 2026-10-28
 
 ### Changed

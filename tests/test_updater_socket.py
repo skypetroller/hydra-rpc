@@ -212,6 +212,35 @@ class SocketDiscoveryTests(unittest.TestCase):
             "/base/discord-ipc-2",
         ])
 
+    def test_candidate_paths_prefer_process_wide_last_good_path(self):
+        with patch.dict(
+            NAMESPACE, {"_LAST_GOOD_SOCKET_PATH": "/base/discord-ipc-2"}
+        ):
+            client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=4)
+            self.assertEqual(client.candidate_paths(), [
+                "/base/discord-ipc-2",
+                "/base/discord-ipc-0",
+                "/base/discord-ipc-1",
+                "/base/discord-ipc-3",
+            ])
+
+    def test_successful_connect_records_process_wide_path(self):
+        client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=3)
+
+        class Dummy:
+            def sendall(self, data):
+                pass
+
+        with (
+            patch.dict(NAMESPACE, {"_LAST_GOOD_SOCKET_PATH": ""}),
+            patch.object(NAMESPACE["RPCClient"], "_connect", return_value=Dummy()),
+            patch.dict(NAMESPACE, {"read_frame": lambda _sock, _timeout: None}),
+        ):
+            client.connect("123")
+            self.assertEqual(
+                NAMESPACE["_LAST_GOOD_SOCKET_PATH"], "/base/discord-ipc-0"
+            )
+
     def test_connect_failure_raises(self):
         client = NAMESPACE["RPCClient"]("/base/discord-ipc", max_socket_attempts=1)
         with patch("socket.socket") as mock_socket:

@@ -15,6 +15,11 @@ exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), NAMESPACE)
 
 
 class HydraRpcTests(unittest.TestCase):
+    def setUp(self):
+        # Marker results are cached process-wide in production; keep tests
+        # isolated because they reuse fake PIDs with different fake environs.
+        NAMESPACE["_MARKER_RESULT_CACHE"].clear()
+
     def test_ipc_frame_encoding(self):
         frame = NAMESPACE["encode_frame"](1, {"cmd": "SET_ACTIVITY"})
         msg_type, size = struct.unpack("<II", frame[:8])
@@ -744,6 +749,58 @@ class HydraRpcTests(unittest.TestCase):
             self.assertTrue(
                 NAMESPACE["has_hydra_marker"]("100", [], {marker.decode()})
             )
+
+    def test_hydra_marker_result_is_cached_for_same_start_tick(self):
+        real_open = open
+        environ_opens = []
+
+        def fake_open(path, *args, **kwargs):
+            if str(path).endswith("/environ"):
+                environ_opens.append(str(path))
+                return BytesIO(b"HOME=/root\x00GAMEID=umu-1\x00")
+            return real_open(path, *args, **kwargs)
+
+        stats = {}
+        with (
+            patch("builtins.open", side_effect=fake_open),
+            patch.dict(NAMESPACE, {"get_process_start_tick": lambda _pid: 424242}),
+        ):
+            first = NAMESPACE["has_hydra_marker"]("777", [], {"gameid=umu-1"}, stats)
+            second = NAMESPACE["has_hydra_marker"]("777", [], {"gameid=umu-1"}, stats)
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(len(environ_opens), 1)
+        self.assertEqual(stats.get("environ_reads"), 1)
+        self.assertEqual(stats.get("environ_cache_hits"), 1)
+
+    def test_hydra_marker_unreadable_environ_is_not_cached(self):
+        environ_opens = []
+
+        def fake_open(path, *args, **kwargs):
+            environ_opens.append(str(path))
+            raise OSError("permission denied")
+
+        stats = {}
+        with (
+            patch("builtins.open", side_effect=fake_open),
+            patch.dict(NAMESPACE, {"get_process_start_tick": lambda _pid: 424243}),
+        ):
+            for _ in range(2):
+                self.assertFalse(
+                    NAMESPACE["has_hydra_marker"]("778", [], {"gameid=umu-1"}, stats)
+                )
+
+        self.assertEqual(len(environ_opens), 2)
+        self.assertEqual(stats.get("environ_reads", 0), 0)
+        self.assertEqual(stats.get("environ_cache_hits", 0), 0)
+
+    def test_log_enabled_respects_current_level(self):
+        levels = NAMESPACE["LOG_LEVELS"]
+        with patch.dict(NAMESPACE, {"CURRENT_LOG_LEVEL": levels["info"]}):
+            self.assertFalse(NAMESPACE["log_enabled"]("debug"))
+            self.assertTrue(NAMESPACE["log_enabled"]("info"))
+            self.assertTrue(NAMESPACE["log_enabled"]("error"))
 
     def test_emulator_fast_path_classification(self):
         real_open = open

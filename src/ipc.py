@@ -42,6 +42,12 @@ def read_frame(sock, timeout):
         return msg_type, None
 
 
+# Process-wide memory of the last socket path that accepted a connection.
+# New RPCClient instances (one per detected game) start with it, so the
+# common -0/-1 probes are skipped in steady state.
+_LAST_GOOD_SOCKET_PATH = ""
+
+
 class RPCClient:
     def __init__(self, base, socket_path="", max_socket_attempts=DEFAULT_SOCKET_ATTEMPTS):
         self.base = base
@@ -73,6 +79,8 @@ class RPCClient:
         paths = []
         if self.last_path:
             paths.append(self.last_path)
+        if _LAST_GOOD_SOCKET_PATH and _LAST_GOOD_SOCKET_PATH not in paths:
+            paths.append(_LAST_GOOD_SOCKET_PATH)
         for i in range(self.max_socket_attempts):
             if len(paths) >= self.max_socket_attempts:
                 break
@@ -82,6 +90,7 @@ class RPCClient:
         return paths
 
     def connect(self, client_id):
+        global _LAST_GOOD_SOCKET_PATH
         if self.sock is not None:
             self.close()
         last_error = None
@@ -90,6 +99,7 @@ class RPCClient:
             try:
                 self.sock = self._connect()
                 self.last_path = path
+                _LAST_GOOD_SOCKET_PATH = path
                 break
             except OSError as e:
                 last_error = e

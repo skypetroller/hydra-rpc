@@ -1,6 +1,11 @@
 # hydra-rpc source module: config (bundled into ./hydra-rpc by build.py)
+def log_enabled(level="info"):
+    """True when a log call at this level would be emitted."""
+    return LOG_LEVELS.get(level, LOG_LEVELS["info"]) >= CURRENT_LOG_LEVEL
+
+
 def log(msg, level="info"):
-    if LOG_LEVELS.get(level, LOG_LEVELS["info"]) < CURRENT_LOG_LEVEL:
+    if not log_enabled(level):
         return
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
     # --status --json keeps stdout as pure JSON; diagnostics go to stderr there.
