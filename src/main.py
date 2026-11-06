@@ -62,7 +62,11 @@ def main(argv=None):
     global LOG_TO_STDERR
     if getattr(args, "json", False) and getattr(args, "status", False):
         LOG_TO_STDERR = True
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 1
     configure_logging(cfg)
     ensure_config(cfg)
 
@@ -82,6 +86,9 @@ def main(argv=None):
     if not index:
         log("no detectable database available; games will need overrides", "error")
     log(f"loaded {len(index)} executable mappings")
+    next_db_refresh = time.monotonic() + db_refresh_interval(
+        cfg, _DB_INFO.get("stale_fallback")
+    )
 
     if args.validate_config:
         valid = validate_config(cfg, index)
@@ -120,6 +127,22 @@ def main(argv=None):
             now = time.monotonic()
             if now < next_scan:
                 time.sleep(next_scan - now)
+            if time.monotonic() >= next_db_refresh:
+                refreshed = load_db(cfg)
+                if refreshed:
+                    index = refreshed
+                    log(
+                        f"refreshed game database: {len(index)} executable "
+                        f"mappings"
+                    )
+                else:
+                    log(
+                        "database refresh failed; keeping the current database",
+                        "warning",
+                    )
+                next_db_refresh = time.monotonic() + db_refresh_interval(
+                    cfg, _DB_INFO.get("stale_fallback")
+                )
             scan_start = time.monotonic()
             stats = {}
             exes = scan_processes(

@@ -17,7 +17,11 @@ exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), NAMESPACE)
 SOURCE = NAMESPACE["validate_update_source"](Path(
     __file__).parents[1].joinpath("hydra-rpc").read_bytes())
 
+# Keep retry coverage fast; production uses a short sleep between attempts.
+NAMESPACE["UPDATE_RETRY_DELAY"] = 0
+
 SIG_404 = urllib.error.HTTPError("url", 404, "not found", {}, io.BytesIO(b""))
+SIG_500 = urllib.error.HTTPError("url", 500, "server error", {}, io.BytesIO(b""))
 
 
 class FakeResponse:
@@ -167,6 +171,116 @@ class UpdaterSignatureTests(unittest.TestCase):
     def test_unsigned_and_unchecksummed_rejected(self):
         with self.assertRaises(ValueError):
             self._fetch(sha_error=SIG_404, sig_error=SIG_404)
+
+    def _source_with_version(self, version):
+        text = SOURCE.decode("utf-8")
+        old = f'SCRIPT_VERSION = "{NAMESPACE["SCRIPT_VERSION"]}"'
+        self.assertIn(old, text)
+        return text.replace(old, f'SCRIPT_VERSION = "{version}"', 1).encode()
+
+    def _fetch_source(self, source, checksum_body, signature_body=None):
+        signature_body = signature_body or self._sign(checksum_body, self.SEED)
+        with patch.object(
+            NAMESPACE["urllib"].request, "urlopen",
+            side_effect=urlopen_for(
+                source, sha_body=checksum_body, sig_body=signature_body
+            ),
+        ):
+            return NAMESPACE["fetch_update_source"]()
+
+    def test_checksum_version_line_must_match_source(self):
+        current = NAMESPACE["SCRIPT_VERSION"]
+        source = self._source_with_version(current)
+        body = (
+            f"{hashlib.sha256(source).hexdigest()}  hydra-rpc\n"
+            f"version {current}\n"
+        ).encode()
+        self.assertEqual(self._fetch_source(source, body), source)
+
+    def test_newer_version_is_accepted(self):
+        source = self._source_with_version("99.0.0")
+        body = (
+            f"{hashlib.sha256(source).hexdigest()}  hydra-rpc\nversion 99.0.0\n"
+        ).encode()
+        self.assertEqual(self._fetch_source(source, body), source)
+
+    def test_downgrade_is_refused(self):
+        source = self._source_with_version("0.0.1")
+        body = (
+            f"{hashlib.sha256(source).hexdigest()}  hydra-rpc\nversion 0.0.1\n"
+        ).encode()
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch_source(source, body)
+        self.assertIn("downgrade", str(ctx.exception))
+
+    def test_checksum_and_source_version_mismatch_is_refused(self):
+        body = (
+            f"{hashlib.sha256(SOURCE).hexdigest()}  hydra-rpc\nversion 9.9.9\n"
+        ).encode()
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch_source(SOURCE, body)
+        self.assertIn("version mismatch", str(ctx.exception))
+
+    def test_transient_checksum_mismatch_is_retried(self):
+        good = f"{hashlib.sha256(SOURCE).hexdigest()}  hydra-rpc\n".encode()
+        bad = f"{'0' * 64}  hydra-rpc\n".encode()
+        bad_signed = self._sign(bad, self.SEED)
+        good_signed = self._sign(good, self.SEED)
+        base = urlopen_for(SOURCE, sha_body=good, sig_body=good_signed)
+        checksum_calls = {"count": 0}
+
+        def flaky_urlopen(req, *args, **kwargs):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if url.endswith(".sha256"):
+                checksum_calls["count"] += 1
+                if checksum_calls["count"] == 1:
+                    return FakeResponse(bad)
+            if url.endswith(".sha256.sig"):
+                if checksum_calls["count"] == 1:
+                    return FakeResponse(bad_signed)
+                return FakeResponse(good_signed)
+            return base(req, *args, **kwargs)
+
+        with patch.object(
+            NAMESPACE["urllib"].request, "urlopen", side_effect=flaky_urlopen
+        ):
+            self.assertEqual(NAMESPACE["fetch_update_source"](), SOURCE)
+        self.assertEqual(checksum_calls["count"], 2)
+
+    def test_metadata_http_error_is_reported(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sha_error=SIG_500)
+        self.assertIn("could not fetch update checksum: HTTP 500", str(ctx.exception))
+
+    def test_metadata_network_error_is_reported(self):
+        error = urllib.error.URLError("offline")
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(sha_error=error)
+        self.assertIn("could not fetch update checksum", str(ctx.exception))
+
+
+class UpdaterVersionParsingTests(unittest.TestCase):
+    def test_parse_version(self):
+        parse = NAMESPACE["parse_version"]
+        self.assertEqual(parse("1.2.3"), (1, 2, 3))
+        self.assertEqual(parse("v1.2.3"), (1, 2, 3))
+        self.assertIsNone(parse("1.2"))
+        self.assertIsNone(parse("1.2.3-rc1"))
+        self.assertIsNone(parse(None))
+
+    def test_version_from_checksum_body(self):
+        read = NAMESPACE["version_from_checksum_body"]
+        self.assertEqual(read(b"abc  hydra-rpc\nversion 1.2.3\n"), "1.2.3")
+        self.assertEqual(read(b"version v9.9.9\n"), "v9.9.9")
+        self.assertIsNone(read(b"abc  hydra-rpc\n"))
+        self.assertIsNone(read(b"version\n"))
+        self.assertIsNone(read(b"\xff\xfe"))
+
+    def test_source_version_reads_constant(self):
+        self.assertEqual(
+            NAMESPACE["source_version"](SOURCE), NAMESPACE["SCRIPT_VERSION"]
+        )
+        self.assertIsNone(NAMESPACE["source_version"](b"print('hello')\n"))
 
 
 class PingProbeTests(unittest.TestCase):

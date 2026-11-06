@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-06
+
+### Added
+
+- Running watchers refresh the detectable-applications database after its TTL
+  expires, with a one-hour minimum between refresh attempts. A failed refresh
+  keeps the current index instead of dropping detection.
+- Signed checksum files now include a `version X.Y.Z` line. The updater checks
+  it against the downloaded script and refuses updates older than the running
+  version.
+
+### Changed
+
+- Config errors are fatal: an existing config that is unreadable, malformed, or
+  not a JSON object now makes hydra-rpc exit with status 1 instead of silently
+  falling back to defaults. A missing config still uses defaults.
+- Process scanning only considers the watcher's own UID. A `.exe` argument must
+  belong to a Wine/Proton/UMU process (loader in argv, `.exe` argv[0], or a
+  Wine/Proton environment variable), so editors and other native apps opening
+  an `.exe` are no longer reported as games.
+- Emulator detection matches exact binary names or Flatpak app IDs instead of
+  substrings. KDE's `dolphin` file manager is no longer mistaken for Dolphin
+  emulator; wrapper names that contain `dolphin-emu` still match.
+- `--exec=PATH`, `-exec=PATH`, `--rom=PATH`, and `-rom=PATH` are recognized
+  when extracting emulator ROM paths.
+- The update checker retries transient checksum/signature mismatches once, so a
+  release that is briefly out of sync on the raw CDN does not fail the check.
+- Bad activity templates fall back to the literal template and warn once
+  instead of raising (which previously skipped every presence update).
+
+### Fixed
+
+- Empty detectable-applications responses (`[]`) are rejected as malformed, so
+  they cannot replace a good cache and disable detection for a full TTL.
+- Cache files (`detectable.json`, `sessions.json`) are written owner-only
+  (`0600`), and existing cache files are tightened on load.
+- `scripts/sign_artifact.py` imports only `src/ed25519.py` instead of executing
+  the full bundle, and refuses signing keys readable by group or others.
+
 ## [1.2.0] - 2026-10-28
 
 ### Added

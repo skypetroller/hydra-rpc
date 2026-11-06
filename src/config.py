@@ -1,4 +1,8 @@
 # hydra-rpc source module: config (bundled into ./hydra-rpc by build.py)
+class ConfigError(Exception):
+    """A config file exists but cannot be parsed or has the wrong shape."""
+
+
 def log_enabled(level="info"):
     """True when a log call at this level would be emitted."""
     return LOG_LEVELS.get(level, LOG_LEVELS["info"]) >= CURRENT_LOG_LEVEL
@@ -79,17 +83,23 @@ def load_config():
     cfg = dict(DEFAULT_CONFIG)
     user_keys = set()
     if os.path.exists(CONFIG_PATH):
+        # A typo in the JSON must not silently disable blocklists or other
+        # safety settings by falling back to defaults. Missing files are fine
+        # (first run); an existing but unreadable/malformed file is fatal.
         try:
             with open(CONFIG_PATH, "r") as f:
                 user = json.load(f)
-            if not isinstance(user, dict):
-                raise ValueError("top-level config must be an object")
-            user_keys = set(user)
-            for key in sorted(user_keys - set(DEFAULT_CONFIG)):
-                log(f"unknown config key '{key}'; ignoring it", "warning")
-            cfg.update({k: v for k, v in user.items() if k in DEFAULT_CONFIG})
-        except Exception as e:
-            log(f"could not read config ({e}); using defaults", "warning")
+        except (OSError, ValueError) as e:
+            raise ConfigError(f"could not read config {CONFIG_PATH}: {e}") from e
+        if not isinstance(user, dict):
+            raise ConfigError(
+                f"config {CONFIG_PATH} must contain a JSON object, "
+                f"not {type(user).__name__}"
+            )
+        user_keys = set(user)
+        for key in sorted(user_keys - set(DEFAULT_CONFIG)):
+            log(f"unknown config key '{key}'; ignoring it", "warning")
+        cfg.update({k: v for k, v in user.items() if k in DEFAULT_CONFIG})
 
     def normalise_number(key, minimum):
         default = DEFAULT_CONFIG[key]

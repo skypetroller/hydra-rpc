@@ -24,15 +24,56 @@ def read_limited(response, limit, label):
     return data
 
 
+def parse_version(text):
+    """Return a comparable (major, minor, patch) tuple or None."""
+    if not isinstance(text, str):
+        return None
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", text.strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def source_version(source):
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', text, re.M)
+    return match.group(1) if match else None
+
+
+def version_from_checksum_body(body):
+    """Read the optional "version X.Y.Z" line from a signed checksum file."""
+    try:
+        lines = body.decode("utf-8").splitlines()
+    except (AttributeError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        line = line.strip()
+        if line.lower().startswith("version "):
+            parts = line.split(None, 1)
+            return parts[1].strip() if len(parts) == 2 else None
+    return None
+
+
+def fetch_update_meta(url, label):
+    req = urllib.request.Request(url, headers={"User-Agent": "hydra-rpc-updater/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
+            return read_limited(response, MAX_UPDATE_META_BYTES, label)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise ValueError(f"could not fetch {label}: HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise ValueError(f"could not fetch {label}: {e}") from e
+
+
 def fetch_update_checksum_body():
     # Best-effort fetch of UPDATE_SHA_URL; returns the raw bytes (needed for
     # signature verification) or None when no checksum is published.
-    req = urllib.request.Request(UPDATE_SHA_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return read_limited(response, MAX_UPDATE_META_BYTES, "update checksum")
-    except Exception:
-        return None
+    return fetch_update_meta(UPDATE_SHA_URL, "update checksum")
 
 
 def checksum_from_body(body):
@@ -48,12 +89,7 @@ def checksum_from_body(body):
 
 def fetch_update_signature_body():
     # Best-effort fetch of UPDATE_SIG_URL; returns raw bytes or None.
-    req = urllib.request.Request(UPDATE_SIG_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
-            return read_limited(response, MAX_UPDATE_META_BYTES, "update signature")
-    except Exception:
-        return None
+    return fetch_update_meta(UPDATE_SIG_URL, "update signature")
 
 
 def parse_update_signature(body):
@@ -88,7 +124,7 @@ def verify_update_signature(checksum_body, signature):
     return False
 
 
-def fetch_update_source():
+def _fetch_update_source_once():
     req = urllib.request.Request(UPDATE_URL, headers={"User-Agent": "hydra-rpc-updater/1.0"})
     with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as response:
         source = read_limited(response, MAX_UPDATE_BYTES, "update source")
@@ -122,7 +158,55 @@ def fetch_update_source():
             f"{expected[:12]}..., got {actual[:12]}...); refusing update"
         )
     log("update checksum verified", "debug")
-    return validate_update_source(source)
+    source = validate_update_source(source)
+
+    declared_version = version_from_checksum_body(checksum_body)
+    actual_version = source_version(source)
+    if actual_version is None:
+        raise ValueError("update source does not declare SCRIPT_VERSION; refusing update")
+    if declared_version is not None:
+        declared = parse_version(declared_version)
+        actual_parsed = parse_version(actual_version)
+        if declared is None or actual_parsed is None or declared != actual_parsed:
+            raise ValueError(
+                f"update version mismatch (checksum says {declared_version}, "
+                f"source says {actual_version}); refusing update"
+            )
+    remote_version = declared_version or actual_version
+    remote = parse_version(remote_version)
+    current = parse_version(SCRIPT_VERSION)
+    if remote is None or current is None:
+        raise ValueError(f"invalid update version {remote_version!r}; refusing update")
+    if remote < current:
+        raise ValueError(
+            f"update is older ({remote_version}) than the running version "
+            f"({SCRIPT_VERSION}); refusing downgrade"
+        )
+    log(f"update signature and version verified ({remote_version})", "debug")
+    return source
+
+
+def fetch_update_source():
+    last_error = None
+    for attempt in range(UPDATE_ATTEMPTS):
+        try:
+            return _fetch_update_source_once()
+        except ValueError as e:
+            last_error = e
+            message = str(e)
+            # A release can land on the raw CDN with the script and metadata
+            # briefly out of sync. Retry verification failures once so a
+            # reader does not see a spurious failure during that window.
+            transient = (
+                "checksum mismatch" in message
+                or "signature verification failed" in message
+            )
+            if attempt + 1 < UPDATE_ATTEMPTS and transient:
+                if UPDATE_RETRY_DELAY:
+                    time.sleep(UPDATE_RETRY_DELAY)
+                continue
+            raise
+    raise last_error
 
 
 def install_update(path, source):

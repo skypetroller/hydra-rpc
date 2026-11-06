@@ -2,6 +2,8 @@
 # Minimal, dependency-free Ed25519 (RFC 8032) used to verify signed update
 # checksums. Points use extended homogeneous coordinates, so a full
 # verification needs no field inversions (fast enough for a one-shot update).
+import hashlib
+
 ED25519_SEED_SIZE = 32
 ED25519_PUBLIC_KEY_SIZE = 32
 ED25519_SIGNATURE_SIZE = 64

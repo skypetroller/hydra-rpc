@@ -19,6 +19,12 @@ class HydraRpcTests(unittest.TestCase):
         # Marker results are cached process-wide in production; keep tests
         # isolated because they reuse fake PIDs with different fake environs.
         NAMESPACE["_MARKER_RESULT_CACHE"].clear()
+        # Fake /proc entries do not have real owners; treat them as ours.
+        uid_patch = patch.dict(
+            NAMESPACE, {"process_uid": lambda _pid: os.getuid()}
+        )
+        uid_patch.start()
+        self.addCleanup(uid_patch.stop)
 
     def test_ipc_frame_encoding(self):
         frame = NAMESPACE["encode_frame"](1, {"cmd": "SET_ACTIVITY"})
@@ -857,9 +863,9 @@ class HydraRpcTests(unittest.TestCase):
     def test_emulator_fast_path_classification(self):
         real_open = open
         procs = {
-            # Wrapper script whose basename contains an emulator token: intended match.
+            # Wrapper script whose basename contains an emulator binary: intended match.
             "100": {
-                "cmdline": b"/usr/bin/my-dolphin-wrapper\0/roms/game.iso\0",
+                "cmdline": b"/usr/bin/my-dolphin-emu-wrapper\0/roms/game.iso\0",
                 "environ": b"",
             },
             # Unrelated process mentioning retroarch but with no ROM path: skip.
@@ -895,6 +901,118 @@ class HydraRpcTests(unittest.TestCase):
         self.assertIn("emulator:dolphin:/roms/game.iso", keys)
         self.assertIn("emulator:retroarch:/roms/game.sfc", keys)
         self.assertEqual(len(keys), 2)
+
+    def test_kde_dolphin_is_not_an_emulator(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/dolphin\0--select\0/home/user/ubuntu.iso\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+
+        self.assertEqual(found, {})
+
+    def test_emulator_exec_equals_argument_is_recognized(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/dolphin-emu\0--exec=/roms/Game.iso\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+
+        self.assertIn("emulator:dolphin:/roms/game.iso", found)
+
+    def test_other_users_processes_are_skipped(self):
+        real_open = open
+        my_uid = os.getuid()
+        procs = {
+            "100": {"cmdline": b"/usr/bin/wine\0/mnt/game/Game.exe\0", "environ": b""},
+            "101": {"cmdline": b"/usr/bin/wine\0/mnt/game/Game.exe\0", "environ": b""},
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101"]),
+            patch("builtins.open", side_effect=fake_open),
+            patch.dict(NAMESPACE, {
+                "process_uid": lambda pid: my_uid + 1 if pid == "100" else my_uid,
+            }),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), False, False)
+
+        self.assertEqual(set(found), {"game.exe"})
+        self.assertEqual(found["game.exe"]["pid"], 101)
+
+    def test_editor_opening_game_exe_is_not_wine(self):
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"/usr/bin/text-editor\0/mnt/game/Game.exe\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), False, False)
+
+        self.assertEqual(found, {})
+
+    def test_invalid_template_index_falls_back_to_literal(self):
+        cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
+        cfg["blocklist_ids"] = set()
+        cfg["blocklist_names"] = set()
+        cfg["rich_activity"] = {}
+        cfg["activity_template"] = "{game_name[99]}"
+
+        game = NAMESPACE["resolve_game"](
+            "example.exe",
+            {"pid": 42, "path": "Example.exe"},
+            {},
+            {"example.exe": ("123", "Example")},
+            cfg,
+        )
+
+        self.assertEqual(game["display_name"], "{game_name[99]}")
 
     def test_cache_key_covers_every_rendered_value(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])

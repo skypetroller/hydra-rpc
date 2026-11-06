@@ -98,6 +98,67 @@ class DbCacheTests(unittest.TestCase):
         self.assertEqual(index, {"game.exe": ("123", "Game")})
         self.assertEqual(cached_after, SAMPLE_DB)
 
+    def test_empty_download_does_not_replace_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            cache.write_text(json.dumps(SAMPLE_DB))
+            old = time.time() - 8 * 24 * 3600
+            os.utime(cache, (old, old))
+            with patch.dict(NAMESPACE, {"DB_CACHE": str(cache), "CACHE_DIR": directory}):
+                with patch.dict(NAMESPACE, {"download_db": lambda _url: []}):
+                    index = NAMESPACE["load_db"](make_cfg())
+                    stale = NAMESPACE["_DB_INFO"]["stale_fallback"]
+            cached_after = json.loads(cache.read_text())
+        self.assertEqual(index, {"game.exe": ("123", "Game")})
+        self.assertEqual(cached_after, SAMPLE_DB)
+        self.assertTrue(stale)
+
+    def test_empty_fresh_cache_is_refetched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            cache.write_text(json.dumps([]))
+            with patch.dict(NAMESPACE, {"DB_CACHE": str(cache), "CACHE_DIR": directory}):
+                with patch.dict(NAMESPACE, {"download_db": lambda _url: SAMPLE_DB}):
+                    index = NAMESPACE["load_db"](make_cfg())
+            cached_after = json.loads(cache.read_text())
+        self.assertEqual(index, {"game.exe": ("123", "Game")})
+        self.assertEqual(cached_after, SAMPLE_DB)
+
+    def test_db_refresh_interval_floor_and_stale_retry(self):
+        interval = NAMESPACE["db_refresh_interval"]
+        self.assertEqual(interval(make_cfg()), 7 * 24 * 3600)
+        self.assertEqual(
+            interval(make_cfg(db_ttl_seconds=0)),
+            NAMESPACE["DB_REFRESH_MIN_SECONDS"],
+        )
+        self.assertEqual(
+            interval(make_cfg(), stale_fallback=True),
+            NAMESPACE["DB_REFRESH_MIN_SECONDS"],
+        )
+
+    def test_cache_files_are_owner_only(self):
+        import stat
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            session = Path(directory) / "sessions.json"
+            with patch.dict(NAMESPACE, {
+                "DB_CACHE": str(cache),
+                "SESSION_CACHE": str(session),
+                "CACHE_DIR": directory,
+            }):
+                with patch.dict(NAMESPACE, {"download_db": lambda _url: SAMPLE_DB}):
+                    NAMESPACE["load_db"](make_cfg())
+                NAMESPACE["save_sessions"]({
+                    "game.exe": {
+                        "start_ms": int(time.time() * 1000),
+                        "pid": 1,
+                        "start_tick": 1,
+                    },
+                })
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(session.stat().st_mode), 0o600)
+
     def test_oversized_download_rejected(self):
         class Response:
             def __enter__(self):

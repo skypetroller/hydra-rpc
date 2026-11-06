@@ -13,16 +13,24 @@ Usage:
 
 The 32-byte secret seed is read from $HYDRA_RPC_SIGNING_KEY (hex or base64)
 or, when unset, from ~/.config/hydra-rpc/signing.key. Never commit the key.
+The key file must not be readable by group or others (chmod 600).
 """
 
 import base64
+import importlib.util
 import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-NAMESPACE = {"__name__": "hydra_rpc_sign"}
-exec(compile((ROOT / "hydra-rpc").read_text(), "hydra-rpc", "exec"), NAMESPACE)
+ED25519_PATH = ROOT / "src" / "ed25519.py"
+
+# Import only the standalone Ed25519 implementation. Signing must never
+# execute the full bundle (or any other repository code) in the process that
+# holds the release seed.
+_spec = importlib.util.spec_from_file_location("hydra_rpc_ed25519", ED25519_PATH)
+ed25519 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ed25519)
 
 COMMENT = "untrusted comment: hydra-rpc release signature\n"
 DEFAULT_KEY = "~/.config/hydra-rpc/signing.key"
@@ -36,13 +44,19 @@ def load_seed():
             raise SystemExit(
                 f"no signing key: set HYDRA_RPC_SIGNING_KEY or create {path}"
             )
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise SystemExit(
+                f"signing key {path} is accessible by group/others "
+                f"(mode {mode:o}); run: chmod 600 {path}"
+            )
         raw = path.read_text().strip()
     for decode in (bytes.fromhex, lambda s: base64.b64decode(s, validate=True)):
         try:
             seed = decode(raw)
         except Exception:
             continue
-        if len(seed) == NAMESPACE["ED25519_SEED_SIZE"]:
+        if len(seed) == ed25519.ED25519_SEED_SIZE:
             return seed
     raise SystemExit("signing key must be 32 bytes, hex- or base64-encoded")
 
@@ -53,7 +67,7 @@ def main(argv):
         return 2
     target = Path(argv[0])
     output = Path(argv[1]) if len(argv) > 1 else Path(str(target) + ".sig")
-    signature = NAMESPACE["ed25519_sign"](target.read_bytes(), load_seed())
+    signature = ed25519.ed25519_sign(target.read_bytes(), load_seed())
     output.write_text(COMMENT + base64.b64encode(signature).decode("ascii") + "\n")
     print(f"signed {target} -> {output} (ed25519)")
     return 0

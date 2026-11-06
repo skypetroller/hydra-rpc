@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import socket
 import struct
@@ -47,13 +48,18 @@ UPDATE_PUBLIC_KEYS = (
     "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
 )
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.2.1"
 UPDATE_TIMEOUT = 30
+UPDATE_ATTEMPTS = 2
+UPDATE_RETRY_DELAY = 1
 # Response-size ceilings: the bundle is ~80 KiB, checksum/signature files are
 # tiny, and the detectable-applications database is ~13 MiB.
 MAX_UPDATE_BYTES = 1 << 20
 MAX_UPDATE_META_BYTES = 16 << 10
 MAX_DB_BYTES = 64 << 20
+# Long-running watchers refresh the game database in the background-ish loop;
+# keep the floor high enough that db_ttl_seconds=0 cannot hammer the endpoint.
+DB_REFRESH_MIN_SECONDS = 3600
 SOCKET_CONNECT_TIMEOUT = 1
 HANDSHAKE_READ_TIMEOUT = 1
 ACTIVITY_ACK_TIMEOUT = 0.5
@@ -86,7 +92,8 @@ DEFAULT_EMULATOR_NAMES = {
 }
 EMULATOR_PROFILES = {
     "retroarch": {
-        "patterns": ("retroarch", "org.libretro.retroarch"),
+        "binaries": ("retroarch",),
+        "flatpak_ids": ("org.libretro.RetroArch",),
         "extensions": {
             ".7z", ".bin", ".cdi", ".chd", ".cia", ".cue", ".fds", ".gb", ".gba",
             ".gbc", ".gdi", ".gen", ".iso", ".m3u", ".md", ".n64", ".nds", ".nes",
@@ -95,34 +102,53 @@ EMULATOR_PROFILES = {
         },
     },
     "duckstation": {
-        "patterns": ("duckstation", "org.duckstation.duckstation"),
+        "binaries": ("duckstation", "duckstation-qt", "duckstation-nogui", "duckstation-sdl"),
+        "flatpak_ids": ("org.duckstation.DuckStation",),
         "extensions": {".bin", ".chd", ".cue", ".ecm", ".img", ".iso", ".m3u", ".pbp"},
     },
     "pcsx2": {
-        "patterns": ("pcsx2", "net.pcsx2.pcsx2"),
+        "binaries": ("pcsx2", "pcsx2-qt"),
+        "flatpak_ids": ("net.pcsx2.PCSX2",),
         "extensions": {".bin", ".chd", ".cso", ".cue", ".gz", ".iso", ".m3u"},
     },
     "rpcs3": {
-        "patterns": ("rpcs3", "net.rpcs3.rpcs3"),
+        "binaries": ("rpcs3",),
+        "flatpak_ids": ("net.rpcs3.RPCS3",),
         "extensions": {".bin", ".elf", ".iso", ".pkg", ".self"},
     },
     "dolphin": {
-        "patterns": ("dolphin", "dolphin-emu", "org.dolphinemu.dolphin-emu"),
+        # KDE's file manager is also called "dolphin"; only the emulator's
+        # actual binary names are accepted here.
+        "binaries": (
+            "dolphin-emu", "dolphin-emu-nogui", "dolphin-emu-qt",
+            "dolphin-emu-qt2",
+        ),
+        "flatpak_ids": ("org.DolphinEmu.dolphin-emu",),
         "extensions": {
             ".ciso", ".dol", ".elf", ".gcm", ".iso", ".rvz", ".wad", ".wbfs", ".wia",
         },
     },
     "ppsspp": {
-        "patterns": ("ppsspp", "ppsspp-qt", "ppsspp-sdl", "org.ppsspp.ppsspp"),
+        "binaries": ("ppsspp", "ppsspp-qt", "ppsspp-sdl"),
+        "flatpak_ids": ("org.ppsspp.PPSSPP",),
         "extensions": {".cso", ".elf", ".iso", ".pbp", ".prx"},
     },
 }
-# Fast path: map an executable basename (or Flatpak app id token) to its
-# emulator profile, so non-emulator processes skip full pattern scanning.
+# Fast path: exact executable basenames and Flatpak app ids. Generic strings
+# such as "dolphin" are deliberately absent so unrelated desktop apps cannot
+# be mistaken for emulators.
 _EMULATOR_BINARY_MAP = {}
+_EMULATOR_FLATPAK_MAP = {}
 for _profile, _settings in EMULATOR_PROFILES.items():
-    for _pattern in _settings["patterns"]:
-        _EMULATOR_BINARY_MAP.setdefault(_pattern, _profile)
+    for _binary in _settings["binaries"]:
+        _EMULATOR_BINARY_MAP.setdefault(_binary.casefold(), _profile)
+    for _app_id in _settings["flatpak_ids"]:
+        _EMULATOR_FLATPAK_MAP.setdefault(_app_id.casefold(), _profile)
+_EMULATOR_TOKEN_BYTES = tuple(sorted({
+    token.casefold().encode("utf-8")
+    for settings in EMULATOR_PROFILES.values()
+    for token in (*settings["binaries"], *settings["flatpak_ids"])
+}))
 LOG_LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
 CURRENT_LOG_LEVEL = LOG_LEVELS["info"]
 LOG_FILE_HANDLE = None

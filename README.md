@@ -49,12 +49,19 @@ Game.exe running through Wine/Proton
 ```
 
 The script checks for running `.exe` arguments every 5 seconds. The Discord game database
-is cached locally and refreshed every 7 days. Activities are refreshed periodically so a
+is cached locally for 7 days; a long-running watcher refreshes it again after the TTL,
+with at least one hour between refresh attempts. Activities are refreshed periodically so a
 lost arRPC connection can be detected and restored.
+
+Only processes owned by the same user are scanned. A `.exe` argument is reported only
+when the process shows Wine/Proton/UMU evidence (a loader in argv, the `.exe` as
+`argv[0]`, or a Wine/Proton environment variable), so a native editor or file manager
+opening a Windows executable is not mistaken for a running game.
 
 When emulator support is enabled, native emulator processes are detected the same way:
 the ROM or game path is read from the emulator's command line and the ROM filename is
-shown in the activity details.
+shown in the activity details. Emulator matching uses exact executable names (such as
+`dolphin-emu`) or exact Flatpak app IDs, not generic substrings.
 
 ## Requirements
 
@@ -233,6 +240,10 @@ What happens next:
 1. Load a game in RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, or PPSSPP.
 2. The watcher reads the ROM or game path from the emulator's command line. An
    emulator sitting idle in its menu, with no game loaded, is not reported.
+   Detection uses the emulator's exact executable name (for example
+   `dolphin-emu`) or Flatpak app ID, so unrelated apps named `dolphin` are
+   ignored. ROM paths passed as `--exec=`/`-exec=` or `--rom=`/`-rom=` are
+   recognized.
 3. Discord shows the emulator as the activity, with the ROM title underneath — for
    example, `Playing RetroArch` with `Super Mario World` below it.
 
@@ -307,7 +318,15 @@ Before installing, the download is verified in layers:
    the running script (`UPDATE_PUBLIC_KEYS`). Signed releases are mandatory: a
    missing, malformed, or non-verifying signature is a hard failure.
 2. **SHA256 checksum** — the downloaded script must match `hydra-rpc.sha256`.
-3. **Syntax check** — always performed after the signature and checksum pass.
+3. **Version check** — the signed `version X.Y.Z` line in the checksum file must
+   match `SCRIPT_VERSION` in the downloaded script, and the update must not be
+   older than the running version. Downgrades are refused.
+4. **Syntax check** — always performed after the signature and checksum pass.
+
+Transient checksum or signature mismatches are retried once, covering the brief
+window where a freshly pushed script and its metadata can disagree on the raw
+CDN. `--check-update` reports HTTP or network errors for metadata separately
+instead of treating them as "not signed".
 
 Downloaded update metadata, the script, and the game database are size-capped,
 so a malformed or hostile response cannot exhaust memory. Releases attach
@@ -482,6 +501,13 @@ Copy [config.example.json](config.example.json) to
 and non-digit application IDs produce startup warnings; run
 `hydra-rpc --validate-config` to check. Editors can use
 [hydra-rpc.schema.json](hydra-rpc.schema.json) for autocompletion and validation.
+
+If the config file exists but is unreadable, malformed JSON, or not a JSON object,
+hydra-rpc exits with status 1 and prints the parse error instead of silently
+using defaults. This prevents a typo from disabling blocklists or other safety
+settings. Delete the file (or fix it) to continue; a missing file still starts
+from defaults.
+
 `config_version` tracks the config format: configs written before it existed log
 a one-time migration hint and missing keys simply use defaults.
 
@@ -584,13 +610,17 @@ make check  # verify + test + lint + status-contract
 ```
 
 `make sha256` regenerates the committed `hydra-rpc.sha256` the updater
-verifies; `make sign` signs it into `hydra-rpc.sha256.sig` using the private
-key at `~/.config/hydra-rpc/signing.key` or `$HYDRA_RPC_SIGNING_KEY`
-(hex/base64, never committed). Commit the bundle, checksum, and signature
-together; CI fails when the signature is stale (`scripts/check_sig.py`). The
-public half is embedded in the script (`UPDATE_PUBLIC_KEYS`, fingerprint
-`1215387a4796f96d`). Tagging `vX.Y.Z` publishes a GitHub Release with the
-three files as assets (see `.github/workflows/release.yml`).
+verifies (including its `version X.Y.Z` line); `make sign` signs it into
+`hydra-rpc.sha256.sig` using the private key at
+`~/.config/hydra-rpc/signing.key` or `$HYDRA_RPC_SIGNING_KEY`
+(hex/base64, never committed). The key file must be owner-only
+(`chmod 600`); the signer refuses group/world-readable keys and imports only
+`src/ed25519.py`, never executing the release bundle. Commit the bundle,
+checksum, and signature together; CI fails when the signature is stale
+(`scripts/check_sig.py`). The public half is embedded in the script
+(`UPDATE_PUBLIC_KEYS`, fingerprint `1215387a4796f96d`). Tagging `vX.Y.Z`
+publishes a GitHub Release with the three files as assets (see
+`.github/workflows/release.yml`).
 
 Tests run automatically for pushes and pull requests through GitHub Actions.
 

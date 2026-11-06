@@ -10,6 +10,7 @@ Usage:
 """
 
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -22,18 +23,41 @@ def digest():
     return hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
 
 
+def version():
+    match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', SCRIPT.read_text(), re.M)
+    if not match:
+        raise SystemExit("SCRIPT_VERSION not found in hydra-rpc")
+    return match.group(1)
+
+
 def main(argv):
     if "--generate" in argv:
-        SHA_FILE.write_text(f"{digest()}  hydra-rpc\n")
+        SHA_FILE.write_text(
+            f"{digest()}  hydra-rpc\nversion {version()}\n"
+        )
         print(f"wrote {SHA_FILE}")
         return 0
     if "--check" in argv:
         if not SHA_FILE.exists():
             print("hydra-rpc.sha256 missing; run: make sha256", file=sys.stderr)
             return 1
-        expected = SHA_FILE.read_text().strip().split()
+        lines = SHA_FILE.read_text().splitlines()
+        expected = lines[0].strip().split() if lines else []
         if not expected or expected[0] != digest():
             print("hydra-rpc.sha256 is stale; run: make sha256", file=sys.stderr)
+            return 1
+        declared = None
+        for line in lines[1:]:
+            line = line.strip()
+            if line.lower().startswith("version "):
+                declared = line.split(None, 1)[1].strip()
+                break
+        if declared != version():
+            print(
+                "hydra-rpc.sha256 version line is missing or stale; "
+                "run: make sha256",
+                file=sys.stderr,
+            )
             return 1
         print("hydra-rpc.sha256 matches hydra-rpc")
         return 0

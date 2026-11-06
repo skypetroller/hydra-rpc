@@ -12,6 +12,10 @@ def validate_db(db):
     """Reject JSON-valid responses that do not have the expected shape."""
     if not isinstance(db, list):
         raise ValueError("expected a JSON list of games")
+    if not db:
+        # Discord's endpoint is never legitimately empty. Accepting [] would
+        # replace a good cache and silently disable detection for a whole TTL.
+        raise ValueError("expected at least one game")
     for game in db:
         if not isinstance(game, dict):
             raise ValueError("expected game objects")
@@ -22,6 +26,23 @@ def validate_db(db):
             if not isinstance(executable, dict):
                 raise ValueError("expected executable objects")
     return db
+
+
+def _write_private_json(path, data, **json_kwargs):
+    """Atomically write JSON with owner-only permissions."""
+    os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, **json_kwargs)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 # Metadata about the last load_db() call, used by build_status_report().
@@ -73,6 +94,10 @@ def load_db(cfg):
 
     if os.path.exists(DB_CACHE):
         try:
+            os.chmod(DB_CACHE, 0o600)
+        except OSError:
+            pass
+        try:
             age = time.time() - os.path.getmtime(DB_CACHE)
             if age < cfg["db_ttl_seconds"]:
                 with open(DB_CACHE, "r") as f:
@@ -89,11 +114,7 @@ def load_db(cfg):
         # Build before persisting: a malformed but JSON-valid response must not
         # replace a good cache and then crash the watcher.
         index = build_index(db)
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        tmp = DB_CACHE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(db, f)
-        os.replace(tmp, DB_CACHE)
+        _write_private_json(DB_CACHE, db)
         log(f"cached {len(db)} detectable applications")
         try:
             _DB_INFO["cached_at"] = int(os.path.getmtime(DB_CACHE))
@@ -131,6 +152,23 @@ def load_db(cfg):
     return {}
 
 
+def db_refresh_interval(cfg, stale_fallback=False):
+    """Seconds until the next periodic database refresh.
+
+    db_ttl_seconds controls cache freshness; the floor keeps a TTL of zero
+    from downloading the multi-megabyte database on every poll. A stale
+    fallback retries hourly instead of waiting for the full TTL.
+    """
+    try:
+        ttl = int(cfg.get("db_ttl_seconds", 0))
+    except (TypeError, ValueError):
+        ttl = 0
+    interval = max(ttl, DB_REFRESH_MIN_SECONDS)
+    if stale_fallback:
+        interval = min(interval, DB_REFRESH_MIN_SECONDS)
+    return interval
+
+
 STALE_SESSION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
 MAX_SESSION_ENTRIES = 256
 
@@ -163,6 +201,10 @@ def load_sessions():
     if not os.path.exists(SESSION_CACHE):
         return {}
     try:
+        os.chmod(SESSION_CACHE, 0o600)
+    except OSError:
+        pass
+    try:
         with open(SESSION_CACHE, "r") as f:
             sessions = json.load(f)
         if not isinstance(sessions, dict):
@@ -175,10 +217,11 @@ def load_sessions():
 
 def save_sessions(sessions):
     try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        tmp = SESSION_CACHE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(prune_sessions(sessions), f, indent=2, sort_keys=True)
-        os.replace(tmp, SESSION_CACHE)
+        _write_private_json(
+            SESSION_CACHE,
+            prune_sessions(sessions),
+            indent=2,
+            sort_keys=True,
+        )
     except OSError as e:
         log(f"could not save session cache ({e})", "warning")

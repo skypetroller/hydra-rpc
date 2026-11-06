@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "hydra-rpc"
@@ -37,6 +38,46 @@ class ConfigMigrationTests(unittest.TestCase):
     def test_invalid_version_is_repaired(self):
         cfg = load_from({"config_version": "not-a-number"})
         self.assertEqual(cfg["config_version"], NAMESPACE["CONFIG_VERSION"])
+
+    def test_malformed_json_is_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text("{not json")
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                with self.assertRaises(NAMESPACE["ConfigError"]):
+                    NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+
+    def test_non_object_config_is_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text("[]")
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                with self.assertRaises(NAMESPACE["ConfigError"]):
+                    NAMESPACE["load_config"]()
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
+
+    def test_validate_config_exits_nonzero_on_malformed_json(self):
+        import io
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text("{not json")
+            old_path = NAMESPACE["CONFIG_PATH"]
+            NAMESPACE["CONFIG_PATH"] = str(config_path)
+            try:
+                with patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(
+                        NAMESPACE["main"](["--validate-config"]), 1
+                    )
+            finally:
+                NAMESPACE["CONFIG_PATH"] = old_path
 
     def test_migrate_config_is_callable_stub(self):
         cfg = {"config_version": 0}

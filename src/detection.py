@@ -50,12 +50,27 @@ class TemplateValues(dict):
         return "{" + key + "}"
 
 
+_TEMPLATE_WARNINGS = set()
+
+
 def render_text(value, values):
     if not isinstance(value, str):
         return value
     try:
         return value.format_map(TemplateValues(values))
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, IndexError, AttributeError, TypeError) as e:
+        # A bad template must not escape into the main loop, where the
+        # catch-all would silently skip every presence update. Fall back to
+        # the literal template and warn once per distinct failure.
+        key = (value, type(e).__name__, str(e))
+        if key not in _TEMPLATE_WARNINGS:
+            if len(_TEMPLATE_WARNINGS) >= 64:
+                _TEMPLATE_WARNINGS.clear()
+            _TEMPLATE_WARNINGS.add(key)
+            log(
+                f"invalid activity template {value!r} ({e}); using it verbatim",
+                "warning",
+            )
         return value
 
 
