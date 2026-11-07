@@ -242,8 +242,10 @@ What happens next:
    emulator sitting idle in its menu, with no game loaded, is not reported.
    Detection uses the emulator's exact executable name (for example
    `dolphin-emu`) or Flatpak app ID, so unrelated apps named `dolphin` are
-   ignored. ROM paths passed as `--exec=`/`-exec=` or `--rom=`/`-rom=` are
-   recognized.
+   ignored. Only Flatpak/bwrap wrappers are scanned for an emulator later in
+   their arguments; wrapper scripts are recognized when they are `argv[1]` of a
+   shell or Python interpreter. ROM paths passed as `--exec=`/`-exec=` or
+   `--rom=`/`-rom=` are recognized.
 3. Discord shows the emulator as the activity, with the ROM title underneath — for
    example, `Playing RetroArch` with `Super Mario World` below it.
 

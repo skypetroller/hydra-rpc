@@ -136,6 +136,74 @@ class DbCacheTests(unittest.TestCase):
             NAMESPACE["DB_REFRESH_MIN_SECONDS"],
         )
 
+    def test_refresh_db_index_keeps_current_on_stale_fallback(self):
+        current = {"current.exe": ("1", "Current")}
+        messages = []
+        previous_info = NAMESPACE["_DB_INFO"]
+
+        def stale_load(_cfg):
+            NAMESPACE["_DB_INFO"] = {
+                "cached_at": None, "fresh": None, "stale_fallback": True,
+            }
+            return {"stale.exe": ("2", "Stale")}
+
+        try:
+            with patch.dict(NAMESPACE, {
+                "load_db": stale_load,
+                "log": lambda msg, level="info": messages.append((level, msg)),
+            }):
+                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
+        finally:
+            NAMESPACE["_DB_INFO"] = previous_info
+        self.assertIs(index, current)
+        self.assertTrue(any("refresh failed" in msg for _, msg in messages))
+        self.assertFalse(any("refreshed game database" in msg for _, msg in messages))
+
+    def test_refresh_db_index_keeps_current_on_empty_result(self):
+        current = {"current.exe": ("1", "Current")}
+        messages = []
+        previous_info = NAMESPACE["_DB_INFO"]
+
+        def empty_load(_cfg):
+            NAMESPACE["_DB_INFO"] = {
+                "cached_at": None, "fresh": None, "stale_fallback": False,
+            }
+            return {}
+
+        try:
+            with patch.dict(NAMESPACE, {
+                "load_db": empty_load,
+                "log": lambda msg, level="info": messages.append((level, msg)),
+            }):
+                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
+        finally:
+            NAMESPACE["_DB_INFO"] = previous_info
+        self.assertIs(index, current)
+        self.assertTrue(any("refresh failed" in msg for _, msg in messages))
+
+    def test_refresh_db_index_accepts_fresh_result(self):
+        current = {"current.exe": ("1", "Current")}
+        fresh = {"fresh.exe": ("2", "Fresh")}
+        messages = []
+        previous_info = NAMESPACE["_DB_INFO"]
+
+        def fresh_load(_cfg):
+            NAMESPACE["_DB_INFO"] = {
+                "cached_at": None, "fresh": True, "stale_fallback": False,
+            }
+            return fresh
+
+        try:
+            with patch.dict(NAMESPACE, {
+                "load_db": fresh_load,
+                "log": lambda msg, level="info": messages.append((level, msg)),
+            }):
+                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
+        finally:
+            NAMESPACE["_DB_INFO"] = previous_info
+        self.assertIs(index, fresh)
+        self.assertTrue(any("refreshed game database" in msg for _, msg in messages))
+
     def test_cache_files_are_owner_only(self):
         import stat
 

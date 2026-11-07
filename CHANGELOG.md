@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-07
+
+### Fixed
+
+- Emulator false positives: arguments are no longer scanned for emulator names
+  in every process. Only Flatpak/bwrap wrappers may carry the emulator later in
+  argv, and wrapper scripts are recognized only as `argv[1]` of a shell or
+  Python interpreter. Commands such as `cp game.iso ~/pcsx2-games/`,
+  `rsync ... ~/.config/PCSX2/`, and `7z x RetroArch.7z` no longer appear as
+  running emulators.
+- A failed periodic database refresh could be logged as successful because
+  `load_db()` returns the stale cache. `refresh_db_index()` now keeps the
+  running index and logs the failure when the result is empty or came from the
+  stale fallback.
+
 ## [1.2.1] - 2026-11-06
 
 ### Added

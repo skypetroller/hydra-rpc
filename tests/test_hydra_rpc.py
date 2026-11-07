@@ -333,7 +333,7 @@ class HydraRpcTests(unittest.TestCase):
                 "environ": b"",
             },
             "101": {
-                "cmdline": b"/usr/bin/launch-retroarch.sh\0/roms/Game.sfc\0",
+                "cmdline": b"/bin/sh\0/usr/bin/launch-retroarch.sh\0/roms/Game.sfc\0",
                 "environ": b"",
             },
             "102": {
@@ -863,9 +863,9 @@ class HydraRpcTests(unittest.TestCase):
     def test_emulator_fast_path_classification(self):
         real_open = open
         procs = {
-            # Wrapper script whose basename contains an emulator binary: intended match.
+            # Wrapper script as argv[1] of a shell: intended match.
             "100": {
-                "cmdline": b"/usr/bin/my-dolphin-emu-wrapper\0/roms/game.iso\0",
+                "cmdline": b"/bin/sh\0/usr/bin/my-dolphin-emu-wrapper\0/roms/game.iso\0",
                 "environ": b"",
             },
             # Unrelated process mentioning retroarch but with no ROM path: skip.
@@ -883,6 +883,16 @@ class HydraRpcTests(unittest.TestCase):
                 "cmdline": b"mount\0/roms/game.iso\0",
                 "environ": b"",
             },
+            # A wrapper invoked directly is not an interpreter child: skip.
+            "104": {
+                "cmdline": b"/usr/bin/my-dolphin-emu-wrapper\0/roms/direct.iso\0",
+                "environ": b"",
+            },
+            # Python wrapper as argv[1]: intended match.
+            "105": {
+                "cmdline": b"/usr/bin/python3.12\0/usr/local/bin/pcsx2-wrapper.py\0/roms/game2.iso\0",
+                "environ": b"",
+            },
         }
 
         def fake_open(path, *args, **kwargs):
@@ -892,7 +902,7 @@ class HydraRpcTests(unittest.TestCase):
             return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
 
         with (
-            patch("os.listdir", return_value=["100", "101", "102", "103"]),
+            patch("os.listdir", return_value=["100", "101", "102", "103", "104", "105"]),
             patch("builtins.open", side_effect=fake_open),
         ):
             found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
@@ -900,7 +910,41 @@ class HydraRpcTests(unittest.TestCase):
         keys = sorted(found)
         self.assertIn("emulator:dolphin:/roms/game.iso", keys)
         self.assertIn("emulator:retroarch:/roms/game.sfc", keys)
-        self.assertEqual(len(keys), 2)
+        self.assertIn("emulator:pcsx2:/roms/game2.iso", keys)
+        self.assertEqual(len(keys), 3)
+
+    def test_emulator_lookalike_arguments_are_ignored(self):
+        # Regression: scanning every argument of every process treated file
+        # copies and archives as running emulators.
+        real_open = open
+        procs = {
+            "100": {
+                "cmdline": b"cp\0game.iso\0/home/user/pcsx2-games/\0",
+                "environ": b"",
+            },
+            "101": {
+                "cmdline": b"rsync\0/path/game.iso\0/home/user/.config/PCSX2/\0",
+                "environ": b"",
+            },
+            "102": {
+                "cmdline": b"7z\0x\0RetroArch.7z\0",
+                "environ": b"",
+            },
+        }
+
+        def fake_open(path, *args, **kwargs):
+            match = re.match(r"/proc/(\d+)/(cmdline|environ)$", str(path))
+            if not match:
+                return real_open(path, *args, **kwargs)
+            return BytesIO(procs.get(match.group(1), {}).get(match.group(2), b""))
+
+        with (
+            patch("os.listdir", return_value=["100", "101", "102"]),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+
+        self.assertEqual(found, {})
 
     def test_kde_dolphin_is_not_an_emulator(self):
         real_open = open

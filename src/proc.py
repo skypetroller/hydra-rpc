@@ -89,6 +89,18 @@ def _basename(value):
     return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].casefold()
 
 
+_EMULATOR_WRAPPER_SHELLS = {
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish",
+}
+
+
+def _is_wrapper_interpreter(base):
+    """True for shells and Python interpreters that can run wrapper scripts."""
+    if base in _EMULATOR_WRAPPER_SHELLS:
+        return True
+    return re.fullmatch(r"(?:python|pypy)(?:\d+(?:\.\d+)*)?", base) is not None
+
+
 def process_uid(pid):
     """Owner of /proc/<pid>.
 
@@ -286,10 +298,10 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
 
         if not emulators_enabled:
             continue
-        # Fast path: only decode/scan processes whose executable looks like a
-        # known emulator (or a Flatpak/bwrap wrapper containing an exact
-        # emulator binary/app-id token). Generic words like "dolphin" are
-        # deliberately not enough: KDE's file manager is also named dolphin.
+        # Fast path: match the emulator itself (argv[0] or /proc/<pid>/exe)
+        # by exact executable name. Generic words like "dolphin" are
+        # deliberately absent from the map: KDE's file manager is also named
+        # dolphin.
         first = parts[0].decode("utf-8", "ignore").strip() if parts and parts[0] else ""
         base0 = _basename(first)
         exe_base = process_exe_basename(pid)
@@ -298,51 +310,50 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
             or _EMULATOR_BINARY_MAP.get(base0)
         )
         if profile is None:
-            for candidate in (exe_base, base0):
-                if not candidate:
+            sandbox = (
+                base0 in ("flatpak", "bwrap") or exe_base in ("flatpak", "bwrap")
+            )
+            if sandbox:
+                # Only Flatpak/bwrap wrappers may carry the real command later
+                # in argv. Scanning every argument of every process would
+                # mistake `cp game.iso ~/pcsx2-games/` for PCSX2.
+                if not _contains_any(raw_lower, _EMULATOR_TOKEN_BYTES):
                     continue
-                for token, candidate_profile in _EMULATOR_BINARY_MAP.items():
-                    if token in candidate:
-                        profile = candidate_profile
+                if decoded is None:
+                    decoded = _decode_parts(parts)
+                # Inside the sandbox, match only exact binary names or exact
+                # Flatpak app ids, never generic substrings.
+                for value in decoded:
+                    token = normalise_argument(value)
+                    base = _basename(token)
+                    if base in _EMULATOR_BINARY_MAP:
+                        profile = _EMULATOR_BINARY_MAP[base]
                         break
-                if profile is not None:
-                    break
-        if profile is None and not _contains_any(raw_lower, _EMULATOR_TOKEN_BYTES):
+                    for app_id, candidate_profile in _EMULATOR_FLATPAK_MAP.items():
+                        if app_id in token.casefold():
+                            profile = candidate_profile
+                            break
+                    if profile is not None:
+                        break
+            elif _is_wrapper_interpreter(base0):
+                # A wrapper script is recognized only as argv[1] of a shell or
+                # Python interpreter. Its basename may contain the emulator
+                # binary (for example my-dolphin-emu-wrapper).
+                if decoded is None:
+                    decoded = _decode_parts(parts)
+                if len(decoded) >= 2:
+                    candidate = _basename(normalise_argument(decoded[1]))
+                    profile = _EMULATOR_BINARY_MAP.get(candidate)
+                    if profile is None:
+                        for binary, candidate_profile in _EMULATOR_BINARY_MAP.items():
+                            if binary in candidate:
+                                profile = candidate_profile
+                                break
+        if profile is None:
             continue
         if decoded is None:
             decoded = _decode_parts(parts)
-        if profile is None:
-            # A launcher/sandbox in argv[0] (or a wrapper script) may carry
-            # the real emulator later in argv. Match only exact binary names
-            # or exact Flatpak app ids there.
-            for value in decoded:
-                token = normalise_argument(value)
-                base = _basename(token)
-                if base in _EMULATOR_BINARY_MAP:
-                    profile = _EMULATOR_BINARY_MAP[base]
-                    break
-                for app_id, candidate_profile in _EMULATOR_FLATPAK_MAP.items():
-                    if app_id in token.casefold():
-                        profile = candidate_profile
-                        break
-                if profile is not None:
-                    break
-        if profile is None:
-            for value in decoded:
-                base = _basename(normalise_argument(value))
-                for binary, candidate_profile in _EMULATOR_BINARY_MAP.items():
-                    if binary in base:
-                        profile = candidate_profile
-                        break
-                if profile is not None:
-                    break
-        if profile is None:
-            continue
         settings = EMULATOR_PROFILES[profile]
-        text = " ".join(decoded).casefold()
-        tokens = (*settings["binaries"], *settings["flatpak_ids"])
-        if not any(token.casefold() in text for token in tokens):
-            continue
         if stats is not None:
             stats["emulator_candidates"] = stats.get("emulator_candidates", 0) + 1
         rom_path = extract_emulator_rom(profile, decoded)

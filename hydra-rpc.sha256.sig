@@ -1,2 +1,2 @@
 untrusted comment: hydra-rpc release signature
-4nCsWjJG5fxB5ckggeC7VISK8jL9Mii0/FxxVpgpz9WCMGn2Ty4dIXgtpt7Ar4O5PJKChA8/XFVMBWj2uziWDQ==
+XM9T+YWZrI15XJUUXvQ+iMDq2odhrOaVaSjkO5vI/Nsm2lbByHCgJC9cebRje6y2mz0cVDI69UE9JYHPx+CpDQ==
