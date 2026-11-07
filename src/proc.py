@@ -89,14 +89,15 @@ def _basename(value):
     return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].casefold()
 
 
-_EMULATOR_WRAPPER_SHELLS = {
-    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish",
+_EMULATOR_WRAPPERS = {"flatpak", "bwrap"}
+_SCRIPT_INTERPRETERS = {
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "env", "perl",
 }
 
 
 def _is_wrapper_interpreter(base):
     """True for shells and Python interpreters that can run wrapper scripts."""
-    if base in _EMULATOR_WRAPPER_SHELLS:
+    if base in _SCRIPT_INTERPRETERS:
         return True
     return re.fullmatch(r"(?:python|pypy)(?:\d+(?:\.\d+)*)?", base) is not None
 
@@ -309,50 +310,51 @@ def scan_processes(blocklist, hydra_markers=None, emulators_enabled=False, mark_
             _EMULATOR_BINARY_MAP.get(exe_base)
             or _EMULATOR_BINARY_MAP.get(base0)
         )
-        if profile is None:
-            sandbox = (
-                base0 in ("flatpak", "bwrap") or exe_base in ("flatpak", "bwrap")
-            )
-            if sandbox:
-                # Only Flatpak/bwrap wrappers may carry the real command later
-                # in argv. Scanning every argument of every process would
-                # mistake `cp game.iso ~/pcsx2-games/` for PCSX2.
-                if not _contains_any(raw_lower, _EMULATOR_TOKEN_BYTES):
-                    continue
-                if decoded is None:
-                    decoded = _decode_parts(parts)
-                # Inside the sandbox, match only exact binary names or exact
-                # Flatpak app ids, never generic substrings.
-                for value in decoded:
-                    token = normalise_argument(value)
-                    base = _basename(token)
-                    if base in _EMULATOR_BINARY_MAP:
-                        profile = _EMULATOR_BINARY_MAP[base]
-                        break
-                    for app_id, candidate_profile in _EMULATOR_FLATPAK_MAP.items():
-                        if app_id in token.casefold():
-                            profile = candidate_profile
-                            break
-                    if profile is not None:
-                        break
-            elif _is_wrapper_interpreter(base0):
-                # A wrapper script is recognized only as argv[1] of a shell or
-                # Python interpreter. Its basename may contain the emulator
-                # binary (for example my-dolphin-emu-wrapper).
-                if decoded is None:
-                    decoded = _decode_parts(parts)
-                if len(decoded) >= 2:
-                    candidate = _basename(normalise_argument(decoded[1]))
-                    profile = _EMULATOR_BINARY_MAP.get(candidate)
-                    if profile is None:
-                        for binary, candidate_profile in _EMULATOR_BINARY_MAP.items():
-                            if binary in candidate:
-                                profile = candidate_profile
-                                break
-        if profile is None:
+        if profile is None and base0.endswith(".appimage"):
+            # AppImages keep their distribution filename as argv[0], so the
+            # emulator name appears as a substring (RetroArch-Linux-x86_64).
+            for binary, candidate_profile in _EMULATOR_BINARY_MAP.items():
+                if binary in base0:
+                    profile = candidate_profile
+                    break
+        if profile is None and not _contains_any(raw_lower, _EMULATOR_TOKEN_BYTES):
+            # Cheap gate for the wrapper scans below: an emulator binary or
+            # Flatpak app id must appear somewhere in the raw cmdline.
             continue
         if decoded is None:
             decoded = _decode_parts(parts)
+        if profile is None and base0 in _EMULATOR_WRAPPERS:
+            # A sandbox in argv[0] carries the real emulator later in argv (its
+            # own PID namespace hides the emulator process). Match only exact
+            # binary names or Flatpak app ids, and only behind such a wrapper:
+            # any other program may merely have a path ending in "PCSX2" or
+            # "dolphin-emu" (their config/data directories) among its arguments.
+            for value in decoded:
+                token = normalise_argument(value)
+                base = _basename(token)
+                if base in _EMULATOR_BINARY_MAP:
+                    profile = _EMULATOR_BINARY_MAP[base]
+                    break
+                for app_id, candidate_profile in _EMULATOR_FLATPAK_MAP.items():
+                    if app_id in token.casefold():
+                        profile = candidate_profile
+                        break
+                if profile is not None:
+                    break
+        if profile is None and len(decoded) > 1 and _is_wrapper_interpreter(base0):
+            # "bash launch-pcsx2.sh game.iso": an interpreter running a wrapper
+            # script names the emulator in argv[1]. Later arguments are data
+            # (paths, URLs, archives), so "cp game.iso ~/pcsx2-games/" or
+            # "7z x RetroArch.7z" must not be mistaken for an emulator.
+            script = _basename(normalise_argument(decoded[1]))
+            profile = _EMULATOR_BINARY_MAP.get(script)
+            if profile is None:
+                for binary, candidate_profile in _EMULATOR_BINARY_MAP.items():
+                    if binary in script:
+                        profile = candidate_profile
+                        break
+        if profile is None:
+            continue
         settings = EMULATOR_PROFILES[profile]
         if stats is not None:
             stats["emulator_candidates"] = stats.get("emulator_candidates", 0) + 1

@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-07
+
+### Fixed
+
+- AppImage builds keep their distribution filename in `argv[0]`
+  (`RetroArch-Linux-x86_64.AppImage`), so emulator names are matched there
+  again without re-enabling broad argument scanning.
+- Direct wrapper scripts are still ignored; wrapper scripts are recognized
+  only as `argv[1]` of a shell, `env`, `perl`, or Python interpreter.
+
+### Changed
+
+- Watcher database refresh now goes through `refresh_db_index()`, which returns
+  `None` for an empty or stale-fallback result; the watcher keeps its current
+  index and logs the warning. Added a watcher-loop regression test.
+
 ## [1.2.2] - 2026-11-07
 
 ### Fixed

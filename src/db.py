@@ -152,18 +152,16 @@ def load_db(cfg):
     return {}
 
 
-def refresh_db_index(cfg, current_index):
-    """Refresh the database, keeping current_index when the refresh fails.
+def refresh_db_index(cfg, index):
+    """Reload an expired database; return the new index, or None to keep `index`.
 
-    load_db() falls back to a stale cache after a failed download, so its
-    return value alone cannot distinguish success from failure. A periodic
-    refresh must not report a stale fallback as a successful update.
+    load_db() falls back to the stale on-disk cache when the download fails and
+    still returns a non-empty index, which a caller must not mistake for a
+    refresh. A running watcher already holds a working index.
     """
     refreshed = load_db(cfg)
-    if not refreshed or _DB_INFO.get("stale_fallback"):
-        log("database refresh failed; keeping the current database", "warning")
-        return current_index
-    log(f"refreshed game database: {len(refreshed)} executable mappings")
+    if not refreshed or _DB_INFO["stale_fallback"]:
+        return None
     return refreshed
 
 

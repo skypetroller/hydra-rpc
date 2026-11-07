@@ -128,7 +128,18 @@ def main(argv=None):
             if now < next_scan:
                 time.sleep(next_scan - now)
             if time.monotonic() >= next_db_refresh:
-                index = refresh_db_index(cfg, index)
+                refreshed = refresh_db_index(cfg, index)
+                if refreshed is not None:
+                    index = refreshed
+                    log(
+                        f"refreshed game database: {len(index)} executable "
+                        f"mappings"
+                    )
+                else:
+                    log(
+                        "database refresh failed; keeping the current database",
+                        "warning",
+                    )
                 next_db_refresh = time.monotonic() + db_refresh_interval(
                     cfg, _DB_INFO.get("stale_fallback")
                 )

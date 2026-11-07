@@ -136,73 +136,49 @@ class DbCacheTests(unittest.TestCase):
             NAMESPACE["DB_REFRESH_MIN_SECONDS"],
         )
 
-    def test_refresh_db_index_keeps_current_on_stale_fallback(self):
-        current = {"current.exe": ("1", "Current")}
-        messages = []
-        previous_info = NAMESPACE["_DB_INFO"]
+    def _refresh(self, download, cache_age_days=8):
+        """Run refresh_db_index() against an aged cache holding SAMPLE_DB."""
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "detectable.json"
+            cache.write_text(json.dumps(SAMPLE_DB))
+            old = time.time() - cache_age_days * 24 * 3600
+            os.utime(cache, (old, old))
+            current = NAMESPACE["build_index"](SAMPLE_DB)
+            with patch.dict(NAMESPACE, {"DB_CACHE": str(cache), "CACHE_DIR": directory}):
+                with patch.dict(NAMESPACE, {"download_db": download}):
+                    refreshed = NAMESPACE["refresh_db_index"](make_cfg(), current)
+            return refreshed, json.loads(cache.read_text())
 
-        def stale_load(_cfg):
-            NAMESPACE["_DB_INFO"] = {
-                "cached_at": None, "fresh": None, "stale_fallback": True,
-            }
-            return {"stale.exe": ("2", "Stale")}
+    def test_refresh_returns_the_new_index_after_a_successful_download(self):
+        new_db = [{"id": "456", "name": "Other", "executables": [{"name": "Other.exe"}]}]
+        refreshed, cached = self._refresh(lambda _url: new_db)
+        self.assertEqual(refreshed, {"other.exe": ("456", "Other")})
+        self.assertEqual(cached, new_db)
 
-        try:
-            with patch.dict(NAMESPACE, {
-                "load_db": stale_load,
-                "log": lambda msg, level="info": messages.append((level, msg)),
-            }):
-                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
-        finally:
-            NAMESPACE["_DB_INFO"] = previous_info
-        self.assertIs(index, current)
-        self.assertTrue(any("refresh failed" in msg for _, msg in messages))
-        self.assertFalse(any("refreshed game database" in msg for _, msg in messages))
+    def test_failed_refresh_keeps_the_current_index(self):
+        # load_db() falls back to the stale cache and returns a non-empty index
+        # in this case; that must not be reported as a refresh.
+        import urllib.error
 
-    def test_refresh_db_index_keeps_current_on_empty_result(self):
-        current = {"current.exe": ("1", "Current")}
-        messages = []
-        previous_info = NAMESPACE["_DB_INFO"]
+        def offline(_url):
+            raise urllib.error.URLError("offline")
 
-        def empty_load(_cfg):
-            NAMESPACE["_DB_INFO"] = {
-                "cached_at": None, "fresh": None, "stale_fallback": False,
-            }
-            return {}
+        refreshed, cached = self._refresh(offline)
+        self.assertIsNone(refreshed)
+        self.assertEqual(cached, SAMPLE_DB)
 
-        try:
-            with patch.dict(NAMESPACE, {
-                "load_db": empty_load,
-                "log": lambda msg, level="info": messages.append((level, msg)),
-            }):
-                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
-        finally:
-            NAMESPACE["_DB_INFO"] = previous_info
-        self.assertIs(index, current)
-        self.assertTrue(any("refresh failed" in msg for _, msg in messages))
+    def test_empty_download_does_not_count_as_a_refresh(self):
+        refreshed, cached = self._refresh(lambda _url: [])
+        self.assertIsNone(refreshed)
+        self.assertEqual(cached, SAMPLE_DB)
 
-    def test_refresh_db_index_accepts_fresh_result(self):
-        current = {"current.exe": ("1", "Current")}
-        fresh = {"fresh.exe": ("2", "Fresh")}
-        messages = []
-        previous_info = NAMESPACE["_DB_INFO"]
-
-        def fresh_load(_cfg):
-            NAMESPACE["_DB_INFO"] = {
-                "cached_at": None, "fresh": True, "stale_fallback": False,
-            }
-            return fresh
-
-        try:
-            with patch.dict(NAMESPACE, {
-                "load_db": fresh_load,
-                "log": lambda msg, level="info": messages.append((level, msg)),
-            }):
-                index = NAMESPACE["refresh_db_index"](make_cfg(), current)
-        finally:
-            NAMESPACE["_DB_INFO"] = previous_info
-        self.assertIs(index, fresh)
-        self.assertTrue(any("refreshed game database" in msg for _, msg in messages))
+    def test_cache_refreshed_elsewhere_is_picked_up(self):
+        # e.g. --validate-config downloaded a new database while we were running.
+        refreshed, _cached = self._refresh(
+            lambda _url: (_ for _ in ()).throw(AssertionError("must not download")),
+            cache_age_days=1,
+        )
+        self.assertEqual(refreshed, {"game.exe": ("123", "Game")})
 
     def test_cache_files_are_owner_only(self):
         import stat

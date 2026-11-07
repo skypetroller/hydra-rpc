@@ -860,6 +860,48 @@ class HydraRpcTests(unittest.TestCase):
             self.assertTrue(NAMESPACE["log_enabled"]("info"))
             self.assertTrue(NAMESPACE["log_enabled"]("error"))
 
+    def test_emulator_names_in_data_arguments_are_not_emulators(self):
+        # Paths ending in "PCSX2" or "dolphin-emu" are normally config/data
+        # directories, and archives or URLs can contain "RetroArch"; none of
+        # these programs is an emulator even though a ROM-like argument is present.
+        ignored = {
+            "cp": b"cp\0/roms/game.iso\0/backup/pcsx2-games/\0",
+            "rsync": b"rsync\0-a\0/roms/game.iso\0/home/u/.config/PCSX2/\0",
+            "ls": b"ls\0/home/u/.local/share/dolphin-emu\0/roms/game.iso\0",
+            "7z": b"7z\0x\0RetroArch-Linux-x86_64.7z\0",
+            "curl": b"curl\0-O\0https://example.invalid/stable/RetroArch.7z\0",
+            "file-roller": b"file-roller\0RetroArch.7z\0",
+            "kde-dolphin": b"dolphin\0--select\0/home/u/Downloads/ubuntu.iso\0",
+            "direct-wrapper": b"/opt/launch-pcsx2.sh\0/roms/Game.iso\0",
+        }
+        detected = {
+            "binary": b"/usr/bin/retroarch\0/roms/Game.sfc\0",
+            "appimage": b"/opt/RetroArch-Linux-x86_64.AppImage\0/roms/Game.sfc\0",
+            "flatpak": b"flatpak\0run\0org.libretro.RetroArch\0/roms/Game.sfc\0",
+            "bwrap": b"bwrap\0--args\x003\0--\0retroarch\0/roms/Game.sfc\0",
+            "wrapper-script": b"bash\0/opt/launch-pcsx2.sh\0/roms/Game.iso\0",
+            "python-wrapper": b"python3\0/opt/pcsx2-wrapper.py\0/roms/Game.iso\0",
+            "env-wrapper": b"env\0/opt/launch-pcsx2.sh\0/roms/Game.iso\0",
+            "perl-wrapper": b"perl\0/opt/launch-retroarch.pl\0/roms/Game.sfc\0",
+            "dolphin-exec-option": b"dolphin-emu\0--exec=/roms/Game.rvz\0",
+        }
+        overrides = {
+            "_iter_cmdlines": lambda stats=None: iter([(4242, self.cmdline)]),
+            "process_exe_basename": lambda _pid: "",
+        }
+        with patch.dict(NAMESPACE, overrides):
+            for label, cmdline in ignored.items():
+                with self.subTest(ignored=label):
+                    self.cmdline = cmdline
+                    found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+                    self.assertEqual(found, {})
+            for label, cmdline in detected.items():
+                with self.subTest(detected=label):
+                    self.cmdline = cmdline
+                    found = NAMESPACE["scan_processes"](set(), set(), True, mark_hydra=False)
+                    self.assertEqual(len(found), 1)
+                    self.assertTrue(next(iter(found)).startswith("emulator:"))
+
     def test_emulator_fast_path_classification(self):
         real_open = open
         procs = {
