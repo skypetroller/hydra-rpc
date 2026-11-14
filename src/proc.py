@@ -89,6 +89,11 @@ def _basename(value):
     return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].casefold()
 
 
+# PS4 title ids look like CUSA00900 or PPSA01284. They are accepted as game
+# arguments by shadPS4, and installed game folders are named after them.
+_PS4_TITLE_ID = re.compile(r"[A-Z]{4}\d{5}")
+
+
 _EMULATOR_WRAPPERS = {"flatpak", "bwrap"}
 _SCRIPT_INTERPRETERS = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "env", "perl",
@@ -390,6 +395,17 @@ def normalise_argument(value):
 
 def extract_emulator_rom(profile, parts):
     extensions = EMULATOR_PROFILES[profile]["extensions"]
+    if profile == "shadps4":
+        # The Qt launcher starts the emulator with --game <path>; the CLI also
+        # accepts -g, a positional path, or a title id such as CUSA00900.
+        for index, value in enumerate(parts[1:], start=1):
+            if normalise_argument(value) not in ("-g", "--game"):
+                continue
+            if index + 1 >= len(parts):
+                break
+            path = normalise_argument(parts[index + 1])
+            if path and not path.startswith("-"):
+                return path
     for value in reversed(parts[1:]):
         path = normalise_argument(value)
         if not path:
@@ -408,6 +424,10 @@ def extract_emulator_rom(profile, parts):
             or "/DEV_HDD0/GAME/" in upper
         ):
             return path
+        if profile == "shadps4" and _PS4_TITLE_ID.fullmatch(
+            _basename(path).upper()
+        ):
+            return path
         extension = os.path.splitext(path)[1].casefold()
         if extension in extensions:
             return path
@@ -421,6 +441,20 @@ def clean_rom_name(profile, rom_path):
     if profile == "rpcs3" and marker in upper:
         path = path[:upper.index(marker)].rstrip("/")
     name = os.path.basename(path) or DEFAULT_EMULATOR_NAMES[profile]
+    if profile == "shadps4" and name.casefold() in (
+        "eboot.bin", "eboot.elf", "eboot.self",
+    ):
+        # The launcher passes .../CUSA00900/eboot.bin; report the title id
+        # (or the game folder) rather than every game appearing as "eboot".
+        components = [part for part in path.split("/") if part]
+        name = DEFAULT_EMULATOR_NAMES[profile]
+        for component in reversed(components[:-1]):
+            if _PS4_TITLE_ID.fullmatch(component.upper()):
+                name = component
+                break
+        else:
+            if len(components) > 1:
+                name = components[-2]
     stem, extension = os.path.splitext(name)
     if extension:
         name = stem

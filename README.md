@@ -12,8 +12,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes and
 ## Features
 
 - Detects Windows games running through Proton, Proton GE, UMU-Proton, and Wine.
-- Detects native emulators RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, and PPSSPP
-  when enabled,
+- Detects native emulators RetroArch, DuckStation, PCSX2, RPCS3, shadPS4, Dolphin,
+  and PPSSPP when enabled,
   showing the emulator as the activity with the ROM title in the details.
 - Works with Hydra, Heroic, Lutris, Bottles, Steam, and similar launchers.
 - Can publish multiple detected game activities at once.
@@ -237,7 +237,8 @@ ROM support is off by default. To turn it on:
 
 What happens next:
 
-1. Load a game in RetroArch, DuckStation, PCSX2, RPCS3, Dolphin, or PPSSPP.
+1. Load a game in RetroArch, DuckStation, PCSX2, RPCS3, shadPS4, Dolphin, or
+   PPSSPP.
 2. The watcher reads the ROM or game path from the emulator's command line. An
    emulator sitting idle in its menu, with no game loaded, is not reported.
    Detection uses the emulator's exact executable name (for example
@@ -246,13 +247,15 @@ What happens next:
    emulator later in their arguments. Wrapper scripts are recognized when they
    are `argv[1]` of a shell, `env`, `perl`, or Python interpreter; a wrapper
    invoked directly is ignored. ROM paths passed as `--exec=`/`-exec=` or
-   `--rom=`/`-rom=` are recognized.
+   `--rom=`/`-rom=` are recognized. shadPS4 games are read from its
+   `--game`/`-g` argument, a positional PKG or eboot path, or a PS4 title ID
+   such as `CUSA00900`.
 3. Discord shows the emulator as the activity, with the ROM title underneath — for
    example, `Playing RetroArch` with `Super Mario World` below it.
 
 RetroArch, PCSX2, and Dolphin already have Discord application IDs, so they work as
-soon as you enable this. DuckStation, RPCS3, and PPSSPP do not, so they are skipped
-until you add an ID. Create one free at
+soon as you enable this. DuckStation, RPCS3, shadPS4, and PPSSPP do not, so they are
+skipped until you add an ID. Create one free at
 <https://discord.com/developers/applications>, then add it like this:
 
 ```json
@@ -261,6 +264,7 @@ until you add an ID. Create one free at
   "emulator_application_ids": {
     "duckstation": "YOUR_DUCKSTATION_APP_ID",
     "rpcs3": "YOUR_RPCS3_APP_ID",
+    "shadps4": "YOUR_SHADPS4_APP_ID",
     "ppsspp": "YOUR_PPSSPP_APP_ID"
   }
 }
@@ -486,7 +490,7 @@ added, so add new settings manually when needed.
 | `max_socket_attempts`      | `3`                             | Maximum automatic socket paths tried (1-10)       |
 | `hydra_only`               | `false`                         | Enable best-effort Hydra-marker filtering        |
 | `hydra_markers`            | Hydra path markers              | Markers used by Hydra-marker mode                |
-| `emulators_enabled`        | `false`                         | Detect 6 supported emulators                    |
+| `emulators_enabled`        | `false`                         | Detect 7 supported emulators                    |
 | `emulator_application_ids` | RetroArch/PCSX2/Dolphin preset | Per-emulator Discord application IDs (all-digit; empty = unconfigured) |
 | `emulator_activity_template` | `"{emulator_name}"`           | Template for the emulator activity name          |
 | `emulator_overrides`       | `{}`                            | Per-emulator or per-ROM application mappings     |
@@ -562,7 +566,7 @@ For a game missing from Discord's database, add a manual mapping:
 
 - Linux only; the watcher uses `/proc`.
 - Windows games running through Wine/Proton are supported; native Linux binaries are not
-  scanned, except for the six supported emulators when `emulators_enabled` is true.
+  scanned, except for the seven supported emulators when `emulators_enabled` is true.
 - A game must be in Discord's detectable database or have an override. Emulated games
   additionally need a configured Discord application ID for their emulator.
 - The game process must expose its `.exe` in a visible command line; unusual wrappers,

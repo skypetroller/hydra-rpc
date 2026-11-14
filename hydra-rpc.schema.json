@@ -24,6 +24,7 @@
         "pcsx2": {"type": "string"},
         "duckstation": {"type": "string"},
         "rpcs3": {"type": "string"},
+        "shadps4": {"type": "string"},
         "dolphin": {"type": "string"},
         "ppsspp": {"type": "string"}
       },

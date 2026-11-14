@@ -399,6 +399,19 @@ class HydraRpcTests(unittest.TestCase):
             "dolphin", ["dolphin-emu", "/roms/Super Mario Sunshine.rvz"]
         )
         ppsspp_path = extract("ppsspp", ["ppsspp", "/roms/Crisis Core.iso"])
+        shadps4_pkg = extract(
+            "shadps4", ["shadps4", "--game", "/games/Bloodborne.pkg"]
+        )
+        shadps4_eboot = extract(
+            "shadps4", ["shadps4", "-g", "/games/CUSA00900/eboot.bin"]
+        )
+        shadps4_folder = extract(
+            "shadps4", ["shadps4", "--game", "/games/Bloodborne"]
+        )
+        shadps4_id = extract("shadps4", ["shadps4", "CUSA00900"])
+        shadps4_positional_pkg = extract(
+            "shadps4", ["shadps4", "/games/Bloodborne.fpkg"]
+        )
 
         self.assertEqual(retroarch_path, "/roms/Super_Mario_World.sfc")
         self.assertEqual(pcsx2_path, "/roms/Final Fantasy X.iso")
@@ -409,6 +422,15 @@ class HydraRpcTests(unittest.TestCase):
         self.assertEqual(clean("dolphin", dolphin_path), "Super Mario Sunshine")
         self.assertEqual(ppsspp_path, "/roms/Crisis Core.iso")
         self.assertEqual(clean("ppsspp", ppsspp_path), "Crisis Core")
+        self.assertEqual(shadps4_pkg, "/games/Bloodborne.pkg")
+        self.assertEqual(shadps4_eboot, "/games/CUSA00900/eboot.bin")
+        self.assertEqual(shadps4_folder, "/games/Bloodborne")
+        self.assertEqual(shadps4_id, "CUSA00900")
+        self.assertEqual(shadps4_positional_pkg, "/games/Bloodborne.fpkg")
+        self.assertEqual(clean("shadps4", shadps4_pkg), "Bloodborne")
+        self.assertEqual(clean("shadps4", shadps4_eboot), "CUSA00900")
+        self.assertEqual(clean("shadps4", shadps4_folder), "Bloodborne")
+        self.assertEqual(clean("shadps4", shadps4_id), "CUSA00900")
 
     def test_emulator_activity_uses_emulator_app_and_rom_details(self):
         cfg = dict(NAMESPACE["DEFAULT_CONFIG"])
@@ -873,6 +895,7 @@ class HydraRpcTests(unittest.TestCase):
             "file-roller": b"file-roller\0RetroArch.7z\0",
             "kde-dolphin": b"dolphin\0--select\0/home/u/Downloads/ubuntu.iso\0",
             "direct-wrapper": b"/opt/launch-pcsx2.sh\0/roms/Game.iso\0",
+            "shadps4-data": b"cp\0game.pkg\0/backup/shadps4-games/\0",
         }
         detected = {
             "binary": b"/usr/bin/retroarch\0/roms/Game.sfc\0",
@@ -884,6 +907,14 @@ class HydraRpcTests(unittest.TestCase):
             "env-wrapper": b"env\0/opt/launch-pcsx2.sh\0/roms/Game.iso\0",
             "perl-wrapper": b"perl\0/opt/launch-retroarch.pl\0/roms/Game.sfc\0",
             "dolphin-exec-option": b"dolphin-emu\0--exec=/roms/Game.rvz\0",
+            "shadps4": b"shadps4\0--game\0/games/Bloodborne.pkg\0",
+            "shadps4-id": b"/usr/bin/shadps4\0-g\0CUSA00900\0",
+            "shadps4-flatpak": (
+                b"flatpak\0run\0net.shadps4.shadPS4\0--game\0/games/Bloodborne\0"
+            ),
+            "shadps4-appimage": (
+                b"/opt/shadPS4QtLauncher-qt.AppImage\0-g\0CUSA00900\0"
+            ),
         }
         overrides = {
             "_iter_cmdlines": lambda stats=None: iter([(4242, self.cmdline)]),

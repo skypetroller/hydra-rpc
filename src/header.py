@@ -48,7 +48,7 @@ UPDATE_PUBLIC_KEYS = (
     "0b7a4375377afe532cad965d6cee8d4e7e51bd6b93a8b7780d8ce69b254bf1b0",
 )
 CONFIG_VERSION = 1
-SCRIPT_VERSION = "1.2.3"
+SCRIPT_VERSION = "1.2.4"
 UPDATE_TIMEOUT = 30
 UPDATE_ATTEMPTS = 2
 UPDATE_RETRY_DELAY = 1
@@ -79,6 +79,7 @@ DEFAULT_EMULATOR_APPLICATION_IDS = {
     "pcsx2": "505494914872770583",
     "duckstation": "",
     "rpcs3": "",
+    "shadps4": "",
     "dolphin": "356943187589201930",
     "ppsspp": "",
 }
@@ -87,6 +88,7 @@ DEFAULT_EMULATOR_NAMES = {
     "duckstation": "DuckStation",
     "pcsx2": "PCSX2",
     "rpcs3": "RPCS3",
+    "shadps4": "shadPS4",
     "dolphin": "Dolphin",
     "ppsspp": "PPSSPP",
 }
@@ -115,6 +117,15 @@ EMULATOR_PROFILES = {
         "binaries": ("rpcs3",),
         "flatpak_ids": ("net.rpcs3.RPCS3",),
         "extensions": {".bin", ".elf", ".iso", ".pkg", ".self"},
+    },
+    "shadps4": {
+        # PS4 games are usually installed CUSA/PPSA title folders or PKG
+        # packages; the Qt launcher starts the emulator with --game <path>.
+        "binaries": ("shadps4", "shadps4-sdl"),
+        "flatpak_ids": ("net.shadps4.shadPS4",),
+        "extensions": {
+            ".bin", ".elf", ".fpkg", ".pkg", ".prx", ".self", ".sprx", ".zar",
+        },
     },
     "dolphin": {
         # KDE's file manager is also called "dolphin"; only the emulator's

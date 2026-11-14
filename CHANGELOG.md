@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-11-14
+
+### Added
+
+- PS4 emulator support for shadPS4: detects the `shadps4`/`shadps4-sdl`
+  executables and the `net.shadps4.shadPS4` Flatpak. Game paths passed with
+  `--game`/`-g`, positional PKG/eboot paths, and PS4 title IDs such as
+  `CUSA00900` are recognized. When the launcher passes
+  `.../CUSA00900/eboot.bin`, the activity uses the title ID instead of
+  `eboot` as the game name. Add `emulator_application_ids.shadps4` to report
+  PS4 games to Discord.
+
 ## [1.2.3] - 2026-11-07
 
 ### Fixed
